@@ -123,6 +123,42 @@ def _configure_data_inputs(df):
     
     return timestamp_col, power_col
 
+def _calculate_roc(df_processed, power_col):
+    """Calculate Rate of Change (ROC) in kW per minute."""
+    df_roc = df_processed.copy()
+    
+    # Calculate time differences in minutes
+    df_roc['time_diff_min'] = df_roc.index.to_series().diff().dt.total_seconds() / 60
+    
+    # Calculate power differences
+    df_roc['power_diff_kw'] = df_roc[power_col].diff()
+    
+    # Calculate ROC (kW per minute)
+    df_roc['roc_kw_per_min'] = df_roc['power_diff_kw'] / df_roc['time_diff_min']
+    
+    # Create clean output dataframe
+    roc_df = pd.DataFrame({
+        'Timestamp': df_roc.index,
+        'Power (kW)': df_roc[power_col],
+        'ROC (kW/min)': df_roc['roc_kw_per_min']
+    })
+    
+    return roc_df
+
+def _detect_data_interval(df_processed):
+    """Detect the data interval from timestamps."""
+    if len(df_processed) > 1:
+        # Get time differences
+        time_diffs = df_processed.index.to_series().diff().dropna()
+        
+        # Find the most common interval
+        mode_interval = time_diffs.mode()
+        if len(mode_interval) > 0:
+            interval_minutes = mode_interval.iloc[0].total_seconds() / 60
+            return interval_minutes
+    
+    return None
+
 def _process_dataframe(df, timestamp_col):
     """Process the dataframe with timestamp parsing, sorting validation, and indexing."""
     df_processed = df.copy()
@@ -197,6 +233,63 @@ if uploaded_file:
             # Show processed data preview
             st.subheader("📋 Processed Data Preview")
             st.dataframe(df_processed[[power_col]].head(20), use_container_width=True)
+            
+            # Detect data interval
+            interval_minutes = _detect_data_interval(df_processed)
+            if interval_minutes:
+                st.info(f"📊 Detected data interval: {interval_minutes:.1f} minutes")
+            
+            # Rate of Change (ROC) Analysis
+            st.subheader("📈 Rate of Change (ROC)")
+            st.markdown("*Rate of change in power consumption (kW per minute)*")
+            
+            # Calculate ROC
+            roc_df = _calculate_roc(df_processed, power_col)
+            
+            # Display ROC statistics
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                avg_roc = roc_df['ROC (kW/min)'].mean()
+                st.metric("Average ROC", f"{avg_roc:.3f} kW/min")
+                
+            with col2:
+                max_roc = roc_df['ROC (kW/min)'].max()
+                st.metric("Max ROC", f"{max_roc:.3f} kW/min")
+                
+            with col3:
+                min_roc = roc_df['ROC (kW/min)'].min()
+                st.metric("Min ROC", f"{min_roc:.3f} kW/min")
+            
+            # Display ROC table
+            st.markdown("**ROC Data Table** (showing first 20 rows)")
+            
+            # Format the ROC values for display
+            roc_display = roc_df.head(20).copy()
+            roc_display['ROC (kW/min)'] = roc_display['ROC (kW/min)'].apply(
+                lambda x: "" if pd.isna(x) else f"{x:.3f}"
+            )
+            roc_display['Power (kW)'] = roc_display['Power (kW)'].apply(
+                lambda x: f"{x:.2f}"
+            )
+            
+            st.dataframe(roc_display, use_container_width=True)
+            
+            # ROC insights
+            with st.expander("💡 ROC Analysis Insights"):
+                st.markdown(f"""
+                **Understanding Rate of Change (ROC):**
+                - **Positive ROC**: Power consumption is increasing
+                - **Negative ROC**: Power consumption is decreasing  
+                - **Zero ROC**: Power consumption is stable
+                
+                **Your Data:**
+                - **Data Interval**: {interval_minutes:.1f} minutes (auto-detected)
+                - **ROC Range**: {min_roc:.3f} to {max_roc:.3f} kW/min
+                - **Average ROC**: {avg_roc:.3f} kW/min
+                
+                **Note:** First row ROC is blank as it requires a previous data point for calculation.
+                """)
             
             # Basic power statistics
             st.subheader("⚡ Power Statistics")
