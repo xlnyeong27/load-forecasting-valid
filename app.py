@@ -2,10 +2,85 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import plotly.graph_objs as go
 from datetime import datetime, timedelta
 import warnings
 
 warnings.filterwarnings('ignore')
+
+# Chart functions
+def _create_demand_chart(df_processed, power_col):
+    """Create line chart of actual kW over time."""
+    fig = go.Figure()
+    
+    fig.add_trace(go.Scatter(
+        x=df_processed.index,
+        y=df_processed[power_col],
+        mode='lines',
+        name='Power Demand',
+        line=dict(color='blue', width=2),
+        hovertemplate='Time: %{x}<br>Power: %{y:.2f} kW<extra></extra>'
+    ))
+    
+    fig.update_layout(
+        title='Power Demand Over Time',
+        xaxis_title='Time',
+        yaxis_title='Power (kW)',
+        height=400,
+        hovermode='x unified'
+    )
+    
+    return fig
+
+def _create_roc_chart(roc_df, threshold_kw_per_min):
+    """Create ROC chart with threshold guides."""
+    fig = go.Figure()
+    
+    # ROC line
+    fig.add_trace(go.Scatter(
+        x=roc_df['Timestamp'],
+        y=roc_df['ROC (kW/min)'],
+        mode='lines',
+        name='Rate of Change',
+        line=dict(color='green', width=2),
+        hovertemplate='Time: %{x}<br>ROC: %{y:.3f} kW/min<extra></extra>'
+    ))
+    
+    # Positive threshold line
+    fig.add_hline(
+        y=threshold_kw_per_min,
+        line_dash="dash",
+        line_color="red",
+        annotation_text=f"+{threshold_kw_per_min} kW/min threshold",
+        annotation_position="top left"
+    )
+    
+    # Negative threshold line
+    fig.add_hline(
+        y=-threshold_kw_per_min,
+        line_dash="dash",
+        line_color="red",
+        annotation_text=f"-{threshold_kw_per_min} kW/min threshold",
+        annotation_position="bottom left"
+    )
+    
+    # Zero line
+    fig.add_hline(
+        y=0,
+        line_dash="dot",
+        line_color="gray",
+        opacity=0.5
+    )
+    
+    fig.update_layout(
+        title=f'Rate of Change (ROC) with ±{threshold_kw_per_min} kW/min Thresholds',
+        xaxis_title='Time',
+        yaxis_title='ROC (kW/min)',
+        height=400,
+        hovermode='x unified'
+    )
+    
+    return fig
 
 # Helper function to read different file formats
 def read_uploaded_file(file):
@@ -243,6 +318,16 @@ if uploaded_file:
             st.subheader("📈 Rate of Change (ROC)")
             st.markdown("*Rate of change in power consumption (kW per minute)*")
             
+            # ROC Threshold Control
+            roc_threshold = st.slider(
+                "ROC Threshold (kW/min)",
+                min_value=0.1,
+                max_value=10.0,
+                value=3.0,
+                step=0.1,
+                help="Threshold for ROC analysis. Values above +T or below -T will be highlighted."
+            )
+            
             # Calculate ROC
             roc_df = _calculate_roc(df_processed, power_col)
             
@@ -289,6 +374,50 @@ if uploaded_file:
                 - **Average ROC**: {avg_roc:.3f} kW/min
                 
                 **Note:** First row ROC is blank as it requires a previous data point for calculation.
+                """)
+            
+            # Charts Section
+            st.subheader("📈 Demand & ROC Charts")
+            st.markdown(f"*Using ROC threshold: ±{roc_threshold} kW/min*")
+            
+            # Chart 1: Power Demand Over Time
+            st.markdown("#### 1️⃣ Power Demand Over Time")
+            demand_chart = _create_demand_chart(df_processed, power_col)
+            st.plotly_chart(demand_chart, use_container_width=True)
+            
+            # Chart 2: ROC Over Time with Thresholds
+            st.markdown("#### 2️⃣ Rate of Change (ROC) with Thresholds")
+            roc_chart = _create_roc_chart(roc_df, roc_threshold)
+            st.plotly_chart(roc_chart, use_container_width=True)
+            
+            # ROC threshold analysis
+            st.markdown("#### 🎯 ROC Threshold Analysis")
+            
+            # Count values above/below thresholds
+            above_positive = len(roc_df[roc_df['ROC (kW/min)'] > roc_threshold])
+            below_negative = len(roc_df[roc_df['ROC (kW/min)'] < -roc_threshold])
+            within_threshold = len(roc_df) - above_positive - below_negative - 1  # -1 for NaN first row
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Above +T", f"{above_positive}", delta=f"{above_positive/len(roc_df)*100:.1f}%")
+            col2.metric("Below -T", f"{below_negative}", delta=f"{below_negative/len(roc_df)*100:.1f}%")
+            col3.metric("Within ±T", f"{within_threshold}", delta=f"{within_threshold/len(roc_df)*100:.1f}%")
+            
+            # Chart insights
+            with st.expander("💡 Chart Insights"):
+                st.markdown(f"""
+                **Demand Chart Analysis:**
+                - Shows actual power consumption over time
+                - Identify patterns, peaks, and trends
+                - Look for daily/weekly cycles
+                
+                **ROC Chart Analysis:**
+                - Red dashed lines: ±{roc_threshold} kW/min thresholds
+                - **Above +{roc_threshold}**: Rapid power increase ({above_positive} points)
+                - **Below -{roc_threshold}**: Rapid power decrease ({below_negative} points)
+                - **Within ±{roc_threshold}**: Stable/gradual changes ({within_threshold} points)
+                
+                **Use the sidebar slider to adjust the threshold and see how it affects the analysis!**
                 """)
             
             # Basic power statistics
