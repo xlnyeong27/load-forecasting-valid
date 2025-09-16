@@ -447,9 +447,15 @@ if uploaded_file:
             anchor_df = roc_df.dropna(subset=["ROC (kW/min)"]).copy()
             anchor_df = anchor_df.reset_index(drop=True)
 
-            # Anchor sampling
+            # Anchor sampling with deterministic approach
             import numpy as np
             import random
+            
+            # Create a deterministic seed based on data characteristics to ensure consistency
+            data_seed = hash(str(len(anchor_df)) + str(anchor_df['Timestamp'].min()) + str(anchor_df['Timestamp'].max())) % 2147483647
+            random.seed(data_seed)
+            np.random.seed(data_seed)
+            
             anchor_indices = []
             if anchor_method == "Random":
                 if len(anchor_df) <= n_anchors:
@@ -474,6 +480,11 @@ if uploaded_file:
                     anchor_indices = sorted(random.sample(ramp_indices, n_anchors))
                 else:
                     anchor_indices = ramp_indices
+            
+            # Reset random state to avoid affecting other parts
+            random.seed()
+            np.random.seed()
+            
             # Fallback if not enough anchors
             if len(anchor_indices) == 0:
                 st.warning("No anchor points found for the selected method. Try another method or lower the threshold.")
@@ -519,6 +530,110 @@ if uploaded_file:
                 # Formatting
                 forecast_df["anchor_ts"] = forecast_df["anchor_ts"].dt.strftime("%Y-%m-%d %H:%M")
                 st.dataframe(forecast_df, use_container_width=True)
+                
+                # --- Interactive Anchor Graphs ---
+                st.markdown("#### 📈 Anchor Point Analysis")
+                st.markdown("*View prediction vs actual for individual anchor points*")
+                
+                # Get unique anchor timestamps for pill selector
+                unique_anchors = forecast_df["anchor_ts"].unique()
+                
+                # Debug: Show what anchors were generated
+                st.write("🔍 **Debug Info:**")
+                st.write(f"Generated {len(unique_anchors)} unique anchors: {list(unique_anchors)}")
+                
+                if len(unique_anchors) > 0:
+                    # Create selectbox for anchor selection (no rerun needed)
+                    st.markdown("**Select Anchor Point:**")
+                    
+                    # Use selectbox instead of buttons to avoid rerun
+                    selected_anchor = st.selectbox(
+                        "Choose anchor timestamp:",
+                        options=unique_anchors,
+                        index=0 if len(unique_anchors) > 0 else 0,
+                        key="anchor_selectbox",
+                        help="Select an anchor point to view its prediction vs actual graph"
+                    )
+                    
+                    # Debug: Show what was selected
+                    st.write(f"Selected anchor: **{selected_anchor}**")
+                    
+                    # Filter data for selected anchor - ensure exact match
+                    selected_anchor_data = forecast_df[forecast_df["anchor_ts"] == selected_anchor].copy()
+                    st.write(f"Found {len(selected_anchor_data)} rows for selected anchor")
+                    
+                    if not selected_anchor_data.empty:
+                        # Sort by horizon for proper line plotting
+                        selected_anchor_data = selected_anchor_data.sort_values("horizon_min")
+                        
+                        # Create the graph for selected anchor
+                        fig_anchor = go.Figure()
+                        
+                        # Plot Prediction line
+                        fig_anchor.add_trace(go.Scatter(
+                            x=selected_anchor_data["horizon_min"],
+                            y=selected_anchor_data["P_hat_kW"],
+                            mode='lines+markers',
+                            name='Prediction',
+                            line=dict(color='#FF6B6B', width=3),
+                            marker=dict(color='#FF6B6B', size=8),
+                            hovertemplate='Horizon: %{x} min<br>Prediction: %{y:.2f} kW<extra></extra>'
+                        ))
+                        
+                        # Plot Actual line
+                        fig_anchor.add_trace(go.Scatter(
+                            x=selected_anchor_data["horizon_min"],
+                            y=selected_anchor_data["P_actual_kW"],
+                            mode='lines+markers',
+                            name='Actual',
+                            line=dict(color='#4ECDC4', width=3),
+                            marker=dict(color='#4ECDC4', size=8),
+                            hovertemplate='Horizon: %{x} min<br>Actual: %{y:.2f} kW<extra></extra>'
+                        ))
+                        
+                        # Update layout
+                        fig_anchor.update_layout(
+                            title=f'Prediction vs Actual for Anchor: {selected_anchor}',
+                            xaxis_title='Horizon (minutes)',
+                            yaxis_title='Power (kW)',
+                            height=400,
+                            hovermode='x unified',
+                            showlegend=True,
+                            legend=dict(
+                                orientation="h",
+                                yanchor="bottom",
+                                y=1.02,
+                                xanchor="right",
+                                x=1
+                            ),
+                            xaxis=dict(
+                                tickmode='array',
+                                tickvals=selected_anchor_data["horizon_min"].tolist()
+                            )
+                        )
+                        
+                        # Display the chart
+                        st.plotly_chart(fig_anchor, use_container_width=True)
+                        
+                        # Display summary statistics for selected anchor
+                        with st.expander(f"📊 Summary for Anchor {selected_anchor}"):
+                            col1, col2, col3, col4 = st.columns(4)
+                            
+                            mean_error = selected_anchor_data["error_kW"].mean()
+                            mean_abs_error = selected_anchor_data["abs_error_kW"].mean()
+                            max_error = selected_anchor_data["error_kW"].abs().max()
+                            anchor_power = selected_anchor_data["P_now_kW"].iloc[0]
+                            
+                            col1.metric("Anchor Power", f"{anchor_power:.2f} kW")
+                            col2.metric("Mean Error", f"{mean_error:+.2f} kW")
+                            col3.metric("Mean Abs Error", f"{mean_abs_error:.2f} kW")
+                            col4.metric("Max Error", f"{max_error:.2f} kW")
+                    else:
+                        st.error(f"No data available for selected anchor point: {selected_anchor}")
+                        st.write("Available data preview:")
+                        st.write(forecast_df[["anchor_ts", "horizon_min", "P_hat_kW", "P_actual_kW"]].head())
+                else:
+                    st.info("No anchor points available. Please generate forecasts first.")
 
             # Basic power statistics
             st.subheader("⚡ Power Statistics")
