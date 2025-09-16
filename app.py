@@ -635,6 +635,87 @@ if uploaded_file:
                 else:
                     st.info("No anchor points available. Please generate forecasts first.")
 
+                # --- Error Percentage Table ---
+                st.markdown("#### 📊 Forecast Error Percentage Table")
+                st.markdown("*Rows: Anchors | Columns: Forecast Minutes | Values: Percentage Error (%)*")
+                
+                if len(unique_anchors) > 0 and len(forecast_df) > 0:
+                    # Calculate percentage errors
+                    forecast_df_copy = forecast_df.copy()
+                    forecast_df_copy["percent_error"] = (forecast_df_copy["abs_error_kW"] / forecast_df_copy["P_actual_kW"]) * 100
+                    
+                    # Create pivot table with anchors as rows and forecast minutes as columns
+                    error_table = forecast_df_copy.pivot_table(
+                        index="anchor_ts", 
+                        columns="horizon_min", 
+                        values="percent_error", 
+                        aggfunc="first"
+                    )
+                    
+                    # Sort by anchor timestamp and horizon
+                    error_table = error_table.sort_index()
+                    error_table = error_table.reindex(columns=sorted(error_table.columns))
+                    
+                    # Format column headers to include "min"
+                    error_table.columns = [f"{col} min" for col in error_table.columns]
+                    
+                    # Display table dimensions
+                    st.info(f"**Table Dimensions:** {len(error_table)} anchors × {len(error_table.columns)} forecast horizons")
+                    
+                    # Format the table for better display
+                    styled_table = error_table.style.format("{:.2f}%").background_gradient(
+                        cmap='RdYlGn_r',  # Red-Yellow-Green reversed (red for high errors)
+                        subset=error_table.columns,
+                        vmin=0,
+                        vmax=30  # Cap gradient at 30% for better color distribution
+                    ).set_table_styles([
+                        {'selector': 'thead th', 'props': [('background-color', '#40466e'), ('color', 'white'), ('font-weight', 'bold')]},
+                        {'selector': 'tbody td', 'props': [('text-align', 'center')]},
+                        {'selector': 'th.row_heading', 'props': [('background-color', '#f0f2f6'), ('font-weight', 'bold')]}
+                    ])
+                    
+                    # Display the styled table
+                    st.dataframe(styled_table, use_container_width=True)
+                    
+                    # Summary statistics for the table
+                    with st.expander("📈 Table Summary Statistics"):
+                        col1, col2, col3, col4 = st.columns(4)
+                        
+                        # Calculate overall statistics
+                        all_errors = error_table.values.flatten()
+                        all_errors = all_errors[~pd.isna(all_errors)]  # Remove NaN values
+                        
+                        if len(all_errors) > 0:
+                            col1.metric("Mean Error", f"{np.mean(all_errors):.2f}%")
+                            col2.metric("Median Error", f"{np.median(all_errors):.2f}%")
+                            col3.metric("Max Error", f"{np.max(all_errors):.2f}%")
+                            col4.metric("Min Error", f"{np.min(all_errors):.2f}%")
+                            
+                            # Best and worst performing combinations
+                            st.markdown("**Performance Analysis:**")
+                            
+                            # Find best and worst anchor-horizon combinations
+                            flat_data = error_table.stack().reset_index()
+                            flat_data.columns = ['Anchor', 'Horizon', 'Error_%']
+                            
+                            best_combo = flat_data.loc[flat_data['Error_%'].idxmin()]
+                            worst_combo = flat_data.loc[flat_data['Error_%'].idxmax()]
+                            
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.success(f"**🏆 Best Performance**  \n{best_combo['Anchor']} @ {best_combo['Horizon']}  \n**{best_combo['Error_%']:.2f}%** error")
+                            with col2:
+                                st.error(f"**⚠️ Worst Performance**  \n{worst_combo['Anchor']} @ {worst_combo['Horizon']}  \n**{worst_combo['Error_%']:.2f}%** error")
+                            
+                            # Error distribution by horizon
+                            st.markdown("**Error by Forecast Horizon:**")
+                            horizon_stats = error_table.describe().T
+                            st.dataframe(horizon_stats.round(2), use_container_width=True)
+                        else:
+                            st.warning("No valid error data available for analysis.")
+                else:
+                    st.info("Generate forecasts first to view error percentage table.")
+
             # Basic power statistics
             st.subheader("⚡ Power Statistics")
             power_stats = df_processed[power_col].describe()
