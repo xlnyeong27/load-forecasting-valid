@@ -403,6 +403,7 @@ if uploaded_file:
             col2.metric("Below -T", f"{below_negative}", delta=f"{below_negative/len(roc_df)*100:.1f}%")
             col3.metric("Within ±T", f"{within_threshold}", delta=f"{within_threshold/len(roc_df)*100:.1f}%")
             
+
             # Chart insights
             with st.expander("💡 Chart Insights"):
                 st.markdown(f"""
@@ -417,13 +418,111 @@ if uploaded_file:
                 - **Below -{roc_threshold}**: Rapid power decrease ({below_negative} points)
                 - **Within ±{roc_threshold}**: Stable/gradual changes ({within_threshold} points)
                 
-                **Use the sidebar slider to adjust the threshold and see how it affects the analysis!**
+                **Use the slider to adjust the threshold and see how it affects the analysis!**
                 """)
-            
+
+            # --- Power Usage Forecast Section ---
+            st.subheader("🔮 Power Usage Forecast Table")
+            st.markdown("Forecast future power using anchor points and ROC.")
+
+            # Controls
+            colA, colB, colC = st.columns(3)
+            with colA:
+                n_anchors = st.number_input("Number of anchors", min_value=3, max_value=100, value=10, step=1)
+            with colB:
+                anchor_method = st.selectbox("Anchor sampling method", ["Random", "Grid (every 15 min)", "Ramp starts"])
+            with colC:
+                horizon_options = [1, 2, 5, 10, 20]
+                horizons = st.multiselect("Forecast horizons (min)", horizon_options, default=[1, 5, 10, 20])
+
+            # Optional controls for headroom/MD risk
+            st.markdown("**(Optional)**: Enter MD target and margin for headroom/risk analysis.")
+            colD, colE = st.columns(2)
+            with colD:
+                md_target = st.number_input("MD target (kW)", min_value=0.0, value=200.0, step=1.0)
+            with colE:
+                md_margin = st.number_input("MD margin (kW)", min_value=0.0, value=10.0, step=1.0)
+
+            # Prepare anchor candidates (exclude first row, drop NA ROC)
+            anchor_df = roc_df.dropna(subset=["ROC (kW/min)"]).copy()
+            anchor_df = anchor_df.reset_index(drop=True)
+
+            # Anchor sampling
+            import numpy as np
+            import random
+            anchor_indices = []
+            if anchor_method == "Random":
+                if len(anchor_df) <= n_anchors:
+                    anchor_indices = list(range(len(anchor_df)))
+                else:
+                    anchor_indices = sorted(random.sample(range(len(anchor_df)), n_anchors))
+            elif anchor_method == "Grid (every 15 min)":
+                # Find indices spaced by at least 15 min
+                anchor_indices = [0]
+                last_ts = anchor_df.loc[0, "Timestamp"]
+                for i, row in anchor_df.iterrows():
+                    if (row["Timestamp"] - last_ts).total_seconds() >= 15*60:
+                        anchor_indices.append(i)
+                        last_ts = row["Timestamp"]
+                    if len(anchor_indices) >= n_anchors:
+                        break
+            elif anchor_method == "Ramp starts":
+                # Anchor at points where ROC crosses threshold
+                ramp_mask = (anchor_df["ROC (kW/min)"] > roc_threshold) | (anchor_df["ROC (kW/min)"] < -roc_threshold)
+                ramp_indices = list(np.where(ramp_mask)[0])
+                if len(ramp_indices) > n_anchors:
+                    anchor_indices = sorted(random.sample(ramp_indices, n_anchors))
+                else:
+                    anchor_indices = ramp_indices
+            # Fallback if not enough anchors
+            if len(anchor_indices) == 0:
+                st.warning("No anchor points found for the selected method. Try another method or lower the threshold.")
+            else:
+                # Build forecast table
+                results = []
+                for idx in anchor_indices:
+                    anchor_row = anchor_df.iloc[idx]
+                    anchor_ts = anchor_row["Timestamp"]
+                    P_now = anchor_row["Power (kW)"]
+                    ROC_now = anchor_row["ROC (kW/min)"]
+                    for h in sorted(horizons):
+                        # Find actual future value
+                        target_ts = anchor_ts + pd.Timedelta(minutes=h)
+                        # Find closest row in df_processed (timestamp is the index)
+                        try:
+                            # Try exact match first
+                            P_actual = df_processed.loc[target_ts, power_col]
+                        except KeyError:
+                            # Try nearest time (if exact not found)
+                            nearest_idx = (df_processed.index - target_ts).abs().idxmin()
+                            P_actual = df_processed.loc[nearest_idx, power_col]
+                        # Forecast
+                        P_hat = P_now + ROC_now * h
+                        error = P_hat - P_actual
+                        abs_error = abs(error)
+                        headroom = md_target - P_hat
+                        md_risk = headroom <= md_margin
+                        results.append({
+                            "anchor_ts": anchor_ts,
+                            "dt_min": 1,
+                            "horizon_min": h,
+                            "P_now_kW": P_now,
+                            "ROC_now_kW_per_min": ROC_now,
+                            "P_hat_kW": P_hat,
+                            "P_actual_kW": P_actual,
+                            "error_kW": error,
+                            "abs_error_kW": abs_error,
+                            "headroom_kW": headroom,
+                            "md_risk": md_risk
+                        })
+                forecast_df = pd.DataFrame(results)
+                # Formatting
+                forecast_df["anchor_ts"] = forecast_df["anchor_ts"].dt.strftime("%Y-%m-%d %H:%M")
+                st.dataframe(forecast_df, use_container_width=True)
+
             # Basic power statistics
             st.subheader("⚡ Power Statistics")
             power_stats = df_processed[power_col].describe()
-            
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Minimum", f"{power_stats['min']:.2f} kW")
             col2.metric("Maximum", f"{power_stats['max']:.2f} kW")
@@ -442,20 +541,20 @@ else:
     # Instructions
     with st.expander("📖 File Format Instructions"):
         st.markdown("""
-        **Supported file formats:**
-        - CSV (.csv)
-        - Excel (.xls, .xlsx)
-        
-        **Required columns:**
-        - **Timestamp column**: Contains date/time information
-        - **Power column**: Contains numeric power values in kW
-        
-        **Example formats:**
-        ```
-        Timestamp,Power_kW
-        2024-01-01 00:00:00,150.5
-        2024-01-01 00:30:00,145.2
-        ```
-        
-        The app will automatically detect your columns based on common naming patterns.
+**Supported file formats:**
+- CSV (.csv)
+- Excel (.xls, .xlsx)
+
+**Required columns:**
+- **Timestamp column**: Contains date/time information
+- **Power column**: Contains numeric power values in kW
+
+**Example formats:**
+```
+Timestamp,Power_kW
+2024-01-01 00:00:00,150.5
+2024-01-01 00:30:00,145.2
+```
+
+The app will automatically detect your columns based on common naming patterns.
         """)
