@@ -716,6 +716,258 @@ if uploaded_file:
                 else:
                     st.info("Generate forecasts first to view error percentage table.")
 
+                # --- Error Distribution Analysis ---
+                st.markdown("#### 📈 Error Distribution by Forecast Horizon")
+                st.markdown("*Distribution graphs showing error percentage spread for ALL data points in the uploaded file*")
+                
+                # Debug: Check if required variables are available
+                try:
+                    st.info(f"Using timestamp column: '{timestamp_col}' and power column: '{power_col}'")
+                    
+                    # Calculate forecasts for ALL data points, not just selected anchors
+                    horizons = [1, 5, 10, 20]  # Standard forecast horizons
+                    roc_window_size = 10  # Use 10 data points for ROC calculation window
+                    
+                    # Create comprehensive forecast dataset using all data points
+                    all_forecasts = []
+                    
+                    with st.spinner("Calculating forecasts for all data points..."):
+                        for i in range(len(df_processed)):
+                            anchor_time = df_processed.index[i]
+                            anchor_power = df_processed.iloc[i][power_col]
+                            
+                            # Calculate ROC for this anchor point
+                            window_start = max(0, i - roc_window_size)
+                            window_data = df_processed.iloc[window_start:i+1]
+                            
+                            if len(window_data) >= 2:
+                                # Calculate ROC using linear regression
+                                window_data = window_data.copy()
+                                window_data['minutes_from_start'] = (
+                                    window_data.index - 
+                                    window_data.index[0]
+                                ).total_seconds() / 60
+                                
+                                if window_data['minutes_from_start'].iloc[-1] > 0:
+                                    # Fit linear regression
+                                    X = window_data['minutes_from_start'].values.reshape(-1, 1)
+                                    y = window_data[power_col].values
+                                    
+                                    # Calculate slope manually (ROC)
+                                    n = len(X)
+                                    sum_x = np.sum(X)
+                                    sum_y = np.sum(y)
+                                    sum_xy = np.sum(X.flatten() * y)
+                                    sum_x2 = np.sum(X * X)
+                                    
+                                    if n * sum_x2 - sum_x * sum_x != 0:
+                                        roc = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x)
+                                    else:
+                                        roc = 0
+                                    
+                                    # Generate forecasts for each horizon
+                                    for horizon in horizons:
+                                        # Find actual value at horizon
+                                        future_idx = i + horizon
+                                        if future_idx < len(df_processed):
+                                            actual_time = df_processed.index[future_idx]
+                                            actual_power = df_processed.iloc[future_idx][power_col]
+                                            
+                                            # Calculate forecast
+                                            forecast_power = anchor_power + (roc * horizon)
+                                            
+                                            # Calculate errors
+                                            error_kw = forecast_power - actual_power
+                                            abs_error_kw = abs(error_kw)
+                                            error_percentage = (abs_error_kw / actual_power) * 100 if actual_power != 0 else 0
+                                            
+                                            all_forecasts.append({
+                                                'anchor_idx': i,
+                                                'anchor_time': anchor_time,
+                                                'anchor_power': anchor_power,
+                                                'horizon_min': horizon,
+                                                'actual_time': actual_time,
+                                                'actual_power': actual_power,
+                                                'forecast_power': forecast_power,
+                                                'roc': roc,
+                                                'error_kw': error_kw,
+                                                'abs_error_kw': abs_error_kw,
+                                                'error_percentage': error_percentage
+                                            })
+                
+                    # Convert to DataFrame
+                    if all_forecasts:
+                        all_forecasts_df = pd.DataFrame(all_forecasts)
+                        
+                        # Display comprehensive summary
+                        total_forecasts = len(all_forecasts_df)
+                        total_anchors = all_forecasts_df['anchor_idx'].nunique()
+                        
+                        st.success(f"**Comprehensive Analysis:** {total_forecasts:,} total forecasts from {total_anchors:,} anchor points across {len(horizons)} horizons")
+                        
+                        # Summary statistics across all data
+                        col1, col2, col3, col4 = st.columns(4)
+                        col1.metric("Total Forecasts", f"{total_forecasts:,}")
+                        col2.metric("Mean Error", f"{all_forecasts_df['error_percentage'].mean():.2f}%")
+                        col3.metric("Median Error", f"{all_forecasts_df['error_percentage'].median():.2f}%")
+                        col4.metric("Max Error", f"{all_forecasts_df['error_percentage'].max():.2f}%")
+                    
+                    # Create distribution plots for each horizon using ALL data
+                    for horizon in horizons:
+                        horizon_data = all_forecasts_df[all_forecasts_df["horizon_min"] == horizon]
+                        
+                        if len(horizon_data) > 0:
+                            st.markdown(f"##### {horizon}-Minute Forecast Horizon (All Data Points)")
+                            
+                            # Create histogram of error percentages
+                            fig_dist = go.Figure()
+                            
+                            # Add histogram
+                            fig_dist.add_trace(go.Histogram(
+                                x=horizon_data["error_percentage"],
+                                nbinsx=30,  # More bins for comprehensive data
+                                name=f"{horizon} min errors",
+                                marker=dict(
+                                    color='rgba(55, 128, 191, 0.7)',
+                                    line=dict(color='rgba(55, 128, 191, 1.0)', width=1)
+                                ),
+                                hovertemplate='Error Range: %{x:.1f}%<br>Count: %{y}<extra></extra>'
+                            ))
+                            
+                            # Add vertical line for mean
+                            mean_error = horizon_data["error_percentage"].mean()
+                            fig_dist.add_vline(
+                                x=mean_error, 
+                                line_dash="dash", 
+                                line_color="red",
+                                annotation_text=f"Mean: {mean_error:.2f}%",
+                                annotation_position="top"
+                            )
+                            
+                            # Add vertical line for median
+                            median_error = horizon_data["error_percentage"].median()
+                            fig_dist.add_vline(
+                                x=median_error, 
+                                line_dash="dot", 
+                                line_color="green",
+                                annotation_text=f"Median: {median_error:.2f}%",
+                                annotation_position="bottom"
+                            )
+                            
+                            # Update layout
+                            fig_dist.update_layout(
+                                title=f'Error % Distribution - {horizon} Min Horizon<br><sub>{len(horizon_data):,} forecasts from all data points</sub>',
+                                xaxis_title='Error Percentage (%)',
+                                yaxis_title='Frequency',
+                                showlegend=False,
+                                height=400,
+                                bargap=0.1
+                            )
+                            
+                            # Display the plot
+                            st.plotly_chart(fig_dist, use_container_width=True)
+                            
+                            # Statistical summary for this horizon
+                            col1, col2, col3, col4, col5 = st.columns(5)
+                            
+                            stats = horizon_data["error_percentage"].describe()
+                            col1.metric("Count", f"{int(stats['count']):,}")
+                            col2.metric("Mean", f"{stats['mean']:.2f}%")
+                            col3.metric("Median", f"{stats['50%']:.2f}%")
+                            col4.metric("Std Dev", f"{stats['std']:.2f}%")
+                            col5.metric("Max", f"{stats['max']:.2f}%")
+                            
+                            # Additional insights
+                            with st.expander(f"📊 Detailed Statistics - {horizon} min horizon (All Data)"):
+                                col1, col2 = st.columns(2)
+                                
+                                with col1:
+                                    st.write("**Percentiles:**")
+                                    st.write(f"• 5th percentile: {horizon_data['error_percentage'].quantile(0.05):.2f}%")
+                                    st.write(f"• 25th percentile: {stats['25%']:.2f}%")
+                                    st.write(f"• 50th percentile: {stats['50%']:.2f}%")
+                                    st.write(f"• 75th percentile: {stats['75%']:.2f}%")
+                                    st.write(f"• 95th percentile: {horizon_data['error_percentage'].quantile(0.95):.2f}%")
+                                
+                                with col2:
+                                    st.write("**Error Categories:**")
+                                    excellent = (horizon_data["error_percentage"] <= 5).sum()
+                                    good = ((horizon_data["error_percentage"] > 5) & (horizon_data["error_percentage"] <= 10)).sum()
+                                    acceptable = ((horizon_data["error_percentage"] > 10) & (horizon_data["error_percentage"] <= 20)).sum()
+                                    poor = (horizon_data["error_percentage"] > 20).sum()
+                                    
+                                    total = len(horizon_data)
+                                    st.write(f"• Excellent (≤5%): {excellent:,} ({excellent/total*100:.1f}%)")
+                                    st.write(f"• Good (5-10%): {good:,} ({good/total*100:.1f}%)")
+                                    st.write(f"• Acceptable (10-20%): {acceptable:,} ({acceptable/total*100:.1f}%)")
+                                    st.write(f"• Poor (>20%): {poor:,} ({poor/total*100:.1f}%)")
+                            
+                            st.markdown("---")  # Separator between horizons
+                    
+                    # Comparative analysis across all horizons using ALL data
+                    st.markdown("##### 🔍 Comparative Horizon Analysis (All Data Points)")
+                    
+                    # Create box plot comparing all horizons
+                    fig_box = go.Figure()
+                    
+                    for horizon in horizons:
+                        horizon_data = all_forecasts_df[all_forecasts_df["horizon_min"] == horizon]
+                        
+                        fig_box.add_trace(go.Box(
+                            y=horizon_data["error_percentage"],
+                            name=f"{horizon} min",
+                            boxpoints='outliers',
+                            hovertemplate='Horizon: %{x}<br>Error: %{y:.2f}%<extra></extra>'
+                        ))
+                    
+                    fig_box.update_layout(
+                        title=f'Error % Distribution Comparison - All {total_forecasts:,} Forecasts',
+                        xaxis_title='Forecast Horizon',
+                        yaxis_title='Error Percentage (%)',
+                        height=500
+                    )
+                    
+                    st.plotly_chart(fig_box, use_container_width=True)
+                    
+                    # Summary table across all horizons using ALL data
+                    horizon_summary = []
+                    for horizon in horizons:
+                        horizon_data = all_forecasts_df[all_forecasts_df["horizon_min"] == horizon]
+                        stats = horizon_data["error_percentage"].describe()
+                        
+                        horizon_summary.append({
+                            'Horizon (min)': horizon,
+                            'Count': f"{int(stats['count']):,}",
+                            'Mean (%)': f"{stats['mean']:.2f}",
+                            'Median (%)': f"{stats['50%']:.2f}",
+                            'Std Dev (%)': f"{stats['std']:.2f}",
+                            'Min (%)': f"{stats['min']:.2f}",
+                            'Max (%)': f"{stats['max']:.2f}",
+                            'Excellent (≤5%)': f"{((horizon_data['error_percentage'] <= 5).sum() / len(horizon_data) * 100):.1f}%"
+                        })
+                    
+                    summary_df = pd.DataFrame(horizon_summary)
+                    st.markdown("**Summary Statistics by Horizon (All Data Points):**")
+                    st.dataframe(summary_df, use_container_width=True)
+                    
+                    # Option to download the comprehensive forecast data
+                    csv = all_forecasts_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Complete Forecast Analysis (CSV)",
+                        data=csv,
+                        file_name="comprehensive_forecast_analysis.csv",
+                        mime="text/csv"
+                    )
+                
+                    if not all_forecasts:
+                        st.warning("No forecast data could be generated. Please check your data and ROC window settings.")
+                
+                except Exception as e:
+                    st.error(f"Error in comprehensive error analysis: {str(e)}")
+                    st.write("Available columns:", list(df_processed.columns))
+                    st.write(f"Timestamp column: {timestamp_col}")
+                    st.write(f"Power column: {power_col}")
+
             # Basic power statistics
             st.subheader("⚡ Power Statistics")
             power_stats = df_processed[power_col].describe()
