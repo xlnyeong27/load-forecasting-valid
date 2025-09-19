@@ -426,11 +426,22 @@ if uploaded_file:
             st.markdown("Forecast future power using anchor points and ROC.")
 
             # Controls
+            # Set up columns for controls
             colA, colB, colC = st.columns(3)
-            with colA:
-                n_anchors = st.number_input("Number of anchors", min_value=3, max_value=100, value=10, step=1)
+            
+            # Get anchor method first to determine UI
             with colB:
-                anchor_method = st.selectbox("Anchor sampling method", ["Random", "Grid (every 15 min)", "Ramp starts"])
+                anchor_method = st.selectbox("Anchor sampling method", ["Random", "Grid (every 15 min)", "Ramp starts", "All available points"])
+                if anchor_method == "All available points":
+                    st.caption("⚠️ This will use all data points for comprehensive analysis (may take longer)")
+            
+            with colA:
+                if anchor_method != "All available points":
+                    n_anchors = st.number_input("Number of anchors", min_value=3, max_value=100, value=10, step=1)
+                else:
+                    st.metric("Total anchor points", "All available", help="Using all data points for comprehensive analysis")
+                    n_anchors = 999999  # Will be updated to actual count below
+            
             with colC:
                 horizon_options = [1, 2, 5, 10, 20]
                 horizons = st.multiselect("Forecast horizons (min)", horizon_options, default=[1, 5, 10, 20])
@@ -446,6 +457,11 @@ if uploaded_file:
             # Prepare anchor candidates (exclude first row, drop NA ROC)
             anchor_df = roc_df.dropna(subset=["ROC (kW/min)"]).copy()
             anchor_df = anchor_df.reset_index(drop=True)
+            
+            # Update n_anchors for "All available points" mode
+            if anchor_method == "All available points":
+                n_anchors = len(anchor_df)
+                st.info(f"Using all {n_anchors} available data points for comprehensive analysis.")
 
             # Anchor sampling with deterministic approach
             import numpy as np
@@ -480,6 +496,9 @@ if uploaded_file:
                     anchor_indices = sorted(random.sample(ramp_indices, n_anchors))
                 else:
                     anchor_indices = ramp_indices
+            elif anchor_method == "All available points":
+                # Use all available data points for comprehensive analysis
+                anchor_indices = list(range(len(anchor_df)))
             
             # Reset random state to avoid affecting other parts
             random.seed()
