@@ -548,11 +548,18 @@ if uploaded_file:
                 forecast_df = pd.DataFrame(results)
                 # Formatting
                 forecast_df["anchor_ts"] = forecast_df["anchor_ts"].dt.strftime("%Y-%m-%d %H:%M")
+                
+                # Display note about sampling vs comprehensive analysis
+                if anchor_method != "All available points":
+                    st.info(f"📋 **Forecast Table**: Showing {len(forecast_df)} sampled anchor points for review. **Error Metrics**: Calculated from ALL {len(anchor_df)} available data points for comprehensive analysis.")
+                else:
+                    st.info(f"📋 **Comprehensive Analysis**: Using all {len(forecast_df)} available data points for both table display and error metrics.")
+                
                 st.dataframe(forecast_df, use_container_width=True)
                 
                 # --- Comprehensive Error Metrics by Horizon ---
                 st.markdown("#### 📈 Comprehensive Error Metrics by Horizon")
-                st.markdown("*Performance metrics calculated from all forecast data points*")
+                st.markdown("*Performance metrics calculated from ALL available data points*")
                 
                 # Configuration for MAPE threshold
                 col1, col2 = st.columns(2)
@@ -564,15 +571,57 @@ if uploaded_file:
                         step=10.0,
                         help="Exclude rows where actual power < threshold from MAPE calculation"
                     )
-                with col2:
-                    st.metric("Total Data Points", len(forecast_df), help="All forecast points used in analysis")
                 
-                # Calculate enhanced metrics per horizon
+                # Build comprehensive forecast dataset using ALL data points for error metrics
+                st.markdown("*Building comprehensive dataset for error analysis...*")
+                comprehensive_results = []
+                
+                # Use all available anchor candidates for comprehensive error metrics
+                for idx in range(len(anchor_df)):
+                    anchor_row = anchor_df.iloc[idx]
+                    anchor_ts = anchor_row["Timestamp"]
+                    P_now = anchor_row["Power (kW)"]
+                    ROC_now = anchor_row["ROC (kW/min)"]
+                    
+                    for h in sorted(horizons):
+                        # Find actual future value
+                        target_ts = anchor_ts + pd.Timedelta(minutes=h)
+                        try:
+                            # Try exact match first
+                            P_actual = df_processed.loc[target_ts, power_col]
+                        except KeyError:
+                            # Try nearest time (if exact not found)
+                            try:
+                                nearest_idx = (df_processed.index - target_ts).abs().idxmin()
+                                P_actual = df_processed.loc[nearest_idx, power_col]
+                            except:
+                                continue  # Skip if no valid future point found
+                        
+                        # Forecast
+                        P_hat = P_now + ROC_now * h
+                        error = P_hat - P_actual
+                        abs_error = abs(error)
+                        
+                        comprehensive_results.append({
+                            "anchor_ts": anchor_ts,
+                            "horizon_min": h,
+                            "P_hat_kW": P_hat,
+                            "P_actual_kW": P_actual,
+                            "error_kW": error,
+                            "abs_error_kW": abs_error
+                        })
+                
+                comprehensive_forecast_df = pd.DataFrame(comprehensive_results)
+                
+                with col2:
+                    st.metric("Total Data Points", len(comprehensive_forecast_df), help="All available data points used in comprehensive analysis")
+                
+                # Calculate enhanced metrics per horizon using comprehensive dataset
                 horizon_metrics = []
-                available_horizons = sorted(forecast_df["horizon_min"].unique())
+                available_horizons = sorted(comprehensive_forecast_df["horizon_min"].unique())
                 
                 # Add APE column for analysis
-                forecast_df_analysis = forecast_df.copy()
+                forecast_df_analysis = comprehensive_forecast_df.copy()
                 forecast_df_analysis["ape"] = (forecast_df_analysis["abs_error_kW"] / forecast_df_analysis["P_actual_kW"]) * 100
                 
                 for horizon in available_horizons:
