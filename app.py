@@ -791,6 +791,203 @@ if uploaded_file:
                         file_name="comprehensive_forecast_metrics.csv",
                         mime="text/csv"
                     )
+                    
+                    # --- Segmented Error Analysis ---
+                    st.markdown("#### 🔍 Segmented Error Analysis")
+                    st.markdown("*Analyze forecast performance across different operational conditions*")
+                    
+                    # Segmentation controls
+                    segment_col1, segment_col2 = st.columns(2)
+                    
+                    with segment_col1:
+                        analysis_type = st.selectbox(
+                            "Analysis Type",
+                            ["Time-of-Day Buckets", "Ramp vs Calm Regimes", "Actual Load Bands"],
+                            help="Choose how to segment the data for detailed analysis"
+                        )
+                    
+                    with segment_col2:
+                        selected_horizon = st.selectbox(
+                            "Focus Horizon (min)",
+                            available_horizons,
+                            index=0,
+                            help="Select one horizon for detailed segmented analysis"
+                        )
+                    
+                    # Filter data for selected horizon
+                    segment_data = forecast_df_analysis[forecast_df_analysis["horizon_min"] == selected_horizon].copy()
+                    
+                    if len(segment_data) > 0:
+                        # Add timestamp column for time-based analysis
+                        segment_data["hour"] = pd.to_datetime(segment_data["anchor_ts"]).dt.hour
+                        
+                        # Helper function to calculate segment metrics
+                        def calculate_segment_metrics(segment_df, segment_name, mape_threshold):
+                            if len(segment_df) == 0:
+                                return None
+                            
+                            # Filter for MAPE calculation
+                            mape_eligible = segment_df[segment_df["P_actual_kW"] >= mape_threshold]
+                            
+                            # Calculate metrics
+                            mae_kw = segment_df["abs_error_kW"].mean()
+                            rmse_kw = np.sqrt((segment_df["error_kW"] ** 2).mean())
+                            mape = mape_eligible["ape"].mean() if len(mape_eligible) > 0 else np.nan
+                            
+                            # sMAPE
+                            smape_values = []
+                            for _, row in segment_df.iterrows():
+                                actual = row["P_actual_kW"]
+                                forecast = row["P_hat_kW"]
+                                if actual != 0 or forecast != 0:
+                                    smape_val = (abs(forecast - actual) / ((abs(actual) + abs(forecast)) / 2)) * 100
+                                    smape_values.append(smape_val)
+                            smape = np.mean(smape_values) if smape_values else np.nan
+                            
+                            # WAPE
+                            total_abs_error = segment_df["abs_error_kW"].sum()
+                            total_actual = segment_df["P_actual_kW"].sum()
+                            wape = (total_abs_error / total_actual) * 100 if total_actual > 0 else np.nan
+                            
+                            return {
+                                'Segment': segment_name,
+                                'Count': len(segment_df),
+                                'MAE (kW)': f"{mae_kw:.2f}",
+                                'RMSE (kW)': f"{rmse_kw:.2f}",
+                                'MAPE (%)': f"{mape:.1f}" if not np.isnan(mape) else "N/A",
+                                'sMAPE (%)': f"{smape:.1f}" if not np.isnan(smape) else "N/A",
+                                'WAPE (%)': f"{wape:.1f}" if not np.isnan(wape) else "N/A"
+                            }
+                        
+                        # Perform segmented analysis based on selected type
+                        segment_results = []
+                        
+                        if analysis_type == "Time-of-Day Buckets":
+                            # Define time buckets
+                            time_buckets = [
+                                (0, 6, "Night (00-06)"),
+                                (6, 12, "Morning (06-12)"),
+                                (12, 18, "Afternoon (12-18)"),
+                                (18, 24, "Evening (18-24)")
+                            ]
+                            
+                            for start_hour, end_hour, bucket_name in time_buckets:
+                                if start_hour == 0:  # Handle midnight case
+                                    bucket_data = segment_data[
+                                        (segment_data["hour"] >= start_hour) & (segment_data["hour"] < end_hour)
+                                    ]
+                                else:
+                                    bucket_data = segment_data[
+                                        (segment_data["hour"] >= start_hour) & (segment_data["hour"] < end_hour)
+                                    ]
+                                
+                                result = calculate_segment_metrics(bucket_data, bucket_name, mape_threshold)
+                                if result:
+                                    segment_results.append(result)
+                        
+                        elif analysis_type == "Ramp vs Calm Regimes":
+                            # Add ROC classification to segment data
+                            segment_data_with_roc = segment_data.merge(
+                                roc_df[["Timestamp", "ROC (kW/min)"]], 
+                                left_on="anchor_ts", 
+                                right_on="Timestamp", 
+                                how="left"
+                            )
+                            
+                            # Classify as ramp or calm
+                            ramp_data = segment_data_with_roc[
+                                (segment_data_with_roc["ROC (kW/min)"].abs() > roc_threshold)
+                            ]
+                            calm_data = segment_data_with_roc[
+                                (segment_data_with_roc["ROC (kW/min)"].abs() <= roc_threshold)
+                            ]
+                            
+                            # Calculate metrics for each regime
+                            ramp_result = calculate_segment_metrics(ramp_data, f"Ramp (|ROC| > {roc_threshold:.1f})", mape_threshold)
+                            calm_result = calculate_segment_metrics(calm_data, f"Calm (|ROC| ≤ {roc_threshold:.1f})", mape_threshold)
+                            
+                            if ramp_result:
+                                segment_results.append(ramp_result)
+                            if calm_result:
+                                segment_results.append(calm_result)
+                        
+                        elif analysis_type == "Actual Load Bands":
+                            # Calculate load percentiles
+                            load_min = segment_data["P_actual_kW"].min()
+                            load_max = segment_data["P_actual_kW"].max()
+                            load_range = load_max - load_min
+                            
+                            # Define load bands based on percentiles
+                            load_bands = [
+                                (load_min, load_min + 0.33 * load_range, "Low Load (0-33%)"),
+                                (load_min + 0.33 * load_range, load_min + 0.67 * load_range, "Medium Load (33-67%)"),
+                                (load_min + 0.67 * load_range, load_max, "High Load (67-100%)")
+                            ]
+                            
+                            for min_load, max_load, band_name in load_bands:
+                                if band_name == "High Load (67-100%)":  # Include max value
+                                    band_data = segment_data[
+                                        (segment_data["P_actual_kW"] >= min_load) & (segment_data["P_actual_kW"] <= max_load)
+                                    ]
+                                else:
+                                    band_data = segment_data[
+                                        (segment_data["P_actual_kW"] >= min_load) & (segment_data["P_actual_kW"] < max_load)
+                                    ]
+                                
+                                result = calculate_segment_metrics(band_data, f"{band_name}\n({min_load:.0f}-{max_load:.0f} kW)", mape_threshold)
+                                if result:
+                                    segment_results.append(result)
+                        
+                        # Display results
+                        if segment_results:
+                            st.markdown(f"**📊 {analysis_type} Analysis - {selected_horizon} min horizon:**")
+                            segment_df = pd.DataFrame(segment_results)
+                            st.dataframe(segment_df, use_container_width=True)
+                            
+                            # Summary insights
+                            with st.expander(f"💡 {analysis_type} Insights"):
+                                if analysis_type == "Time-of-Day Buckets":
+                                    st.markdown(f"""
+                                    **Time-of-Day Performance Analysis:**
+                                    - Compare forecast accuracy across different times of day
+                                    - Identify if certain time periods have better/worse performance
+                                    - Look for patterns related to operational schedules or demand cycles
+                                    
+                                    **Your Data ({selected_horizon} min horizon):**
+                                    - Total segments analyzed: {len(segment_results)}
+                                    - Use this to optimize forecasting strategies for different time periods
+                                    """)
+                                elif analysis_type == "Ramp vs Calm Regimes":
+                                    ramp_count = sum(1 for r in segment_results if "Ramp" in r['Segment'])
+                                    calm_count = sum(1 for r in segment_results if "Calm" in r['Segment'])
+                                    st.markdown(f"""
+                                    **Ramp vs Calm Performance Analysis:**
+                                    - **Ramp periods**: High rate of change (|ROC| > {roc_threshold:.1f} kW/min)
+                                    - **Calm periods**: Stable conditions (|ROC| ≤ {roc_threshold:.1f} kW/min)
+                                    - Compare forecast accuracy during dynamic vs stable conditions
+                                    
+                                    **Your Data ({selected_horizon} min horizon):**
+                                    - Ramp regimes analyzed: {ramp_count}
+                                    - Calm regimes analyzed: {calm_count}
+                                    - Use this to understand forecast performance during load transitions
+                                    """)
+                                elif analysis_type == "Actual Load Bands":
+                                    st.markdown(f"""
+                                    **Load Band Performance Analysis:**
+                                    - Compare forecast accuracy across different load levels
+                                    - Identify if forecasting is better at high, medium, or low loads
+                                    - Understand performance across the operational range
+                                    
+                                    **Your Data ({selected_horizon} min horizon):**
+                                    - Load range: {load_min:.0f} - {load_max:.0f} kW
+                                    - Segments analyzed: {len(segment_results)}
+                                    - Use this to understand forecast reliability across load conditions
+                                    """)
+                        else:
+                            st.warning(f"No data available for {analysis_type} analysis at {selected_horizon} min horizon.")
+                    else:
+                        st.warning(f"No forecast data available for {selected_horizon} min horizon.")
+                
                 else:
                     st.warning("No forecast data available for metrics calculation.")
 
