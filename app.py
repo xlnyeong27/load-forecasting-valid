@@ -550,446 +550,200 @@ if uploaded_file:
                 forecast_df["anchor_ts"] = forecast_df["anchor_ts"].dt.strftime("%Y-%m-%d %H:%M")
                 st.dataframe(forecast_df, use_container_width=True)
                 
-                # --- Interactive Anchor Graphs ---
-                st.markdown("#### 📈 Anchor Point Analysis")
-                st.markdown("*View prediction vs actual for individual anchor points*")
-                
-                # Get unique anchor timestamps for pill selector
-                unique_anchors = forecast_df["anchor_ts"].unique()
-                
-                # Debug: Show what anchors were generated
-                st.write("🔍 **Debug Info:**")
-                st.write(f"Generated {len(unique_anchors)} unique anchors: {list(unique_anchors)}")
-                
-                if len(unique_anchors) > 0:
-                    # Create selectbox for anchor selection (no rerun needed)
-                    st.markdown("**Select Anchor Point:**")
-                    
-                    # Use selectbox instead of buttons to avoid rerun
-                    selected_anchor = st.selectbox(
-                        "Choose anchor timestamp:",
-                        options=unique_anchors,
-                        index=0 if len(unique_anchors) > 0 else 0,
-                        key="anchor_selectbox",
-                        help="Select an anchor point to view its prediction vs actual graph"
-                    )
-                    
-                    # Debug: Show what was selected
-                    st.write(f"Selected anchor: **{selected_anchor}**")
-                    
-                    # Filter data for selected anchor - ensure exact match
-                    selected_anchor_data = forecast_df[forecast_df["anchor_ts"] == selected_anchor].copy()
-                    st.write(f"Found {len(selected_anchor_data)} rows for selected anchor")
-                    
-                    if not selected_anchor_data.empty:
-                        # Sort by horizon for proper line plotting
-                        selected_anchor_data = selected_anchor_data.sort_values("horizon_min")
-                        
-                        # Create the graph for selected anchor
-                        fig_anchor = go.Figure()
-                        
-                        # Plot Prediction line
-                        fig_anchor.add_trace(go.Scatter(
-                            x=selected_anchor_data["horizon_min"],
-                            y=selected_anchor_data["P_hat_kW"],
-                            mode='lines+markers',
-                            name='Prediction',
-                            line=dict(color='#FF6B6B', width=3),
-                            marker=dict(color='#FF6B6B', size=8),
-                            hovertemplate='Horizon: %{x} min<br>Prediction: %{y:.2f} kW<extra></extra>'
-                        ))
-                        
-                        # Plot Actual line
-                        fig_anchor.add_trace(go.Scatter(
-                            x=selected_anchor_data["horizon_min"],
-                            y=selected_anchor_data["P_actual_kW"],
-                            mode='lines+markers',
-                            name='Actual',
-                            line=dict(color='#4ECDC4', width=3),
-                            marker=dict(color='#4ECDC4', size=8),
-                            hovertemplate='Horizon: %{x} min<br>Actual: %{y:.2f} kW<extra></extra>'
-                        ))
-                        
-                        # Update layout
-                        fig_anchor.update_layout(
-                            title=f'Prediction vs Actual for Anchor: {selected_anchor}',
-                            xaxis_title='Horizon (minutes)',
-                            yaxis_title='Power (kW)',
-                            height=400,
-                            hovermode='x unified',
-                            showlegend=True,
-                            legend=dict(
-                                orientation="h",
-                                yanchor="bottom",
-                                y=1.02,
-                                xanchor="right",
-                                x=1
-                            ),
-                            xaxis=dict(
-                                tickmode='array',
-                                tickvals=selected_anchor_data["horizon_min"].tolist()
-                            )
-                        )
-                        
-                        # Display the chart
-                        st.plotly_chart(fig_anchor, use_container_width=True)
-                        
-                        # Display summary statistics for selected anchor
-                        with st.expander(f"📊 Summary for Anchor {selected_anchor}"):
-                            col1, col2, col3, col4 = st.columns(4)
-                            
-                            mean_error = selected_anchor_data["error_kW"].mean()
-                            mean_abs_error = selected_anchor_data["abs_error_kW"].mean()
-                            max_error = selected_anchor_data["error_kW"].abs().max()
-                            anchor_power = selected_anchor_data["P_now_kW"].iloc[0]
-                            
-                            col1.metric("Anchor Power", f"{anchor_power:.2f} kW")
-                            col2.metric("Mean Error", f"{mean_error:+.2f} kW")
-                            col3.metric("Mean Abs Error", f"{mean_abs_error:.2f} kW")
-                            col4.metric("Max Error", f"{max_error:.2f} kW")
-                    else:
-                        st.error(f"No data available for selected anchor point: {selected_anchor}")
-                        st.write("Available data preview:")
-                        st.write(forecast_df[["anchor_ts", "horizon_min", "P_hat_kW", "P_actual_kW"]].head())
-                else:
-                    st.info("No anchor points available. Please generate forecasts first.")
-
-                # --- Error Percentage Table ---
-                st.markdown("#### 📊 Forecast Error Percentage Table")
-                st.markdown("*Rows: Anchors | Columns: Forecast Minutes | Values: Percentage Error (%)*")
-                
-                if len(unique_anchors) > 0 and len(forecast_df) > 0:
-                    # Calculate percentage errors
-                    forecast_df_copy = forecast_df.copy()
-                    forecast_df_copy["percent_error"] = (forecast_df_copy["abs_error_kW"] / forecast_df_copy["P_actual_kW"]) * 100
-                    
-                    # Create pivot table with anchors as rows and forecast minutes as columns
-                    error_table = forecast_df_copy.pivot_table(
-                        index="anchor_ts", 
-                        columns="horizon_min", 
-                        values="percent_error", 
-                        aggfunc="first"
-                    )
-                    
-                    # Sort by anchor timestamp and horizon
-                    error_table = error_table.sort_index()
-                    error_table = error_table.reindex(columns=sorted(error_table.columns))
-                    
-                    # Format column headers to include "min"
-                    error_table.columns = [f"{col} min" for col in error_table.columns]
-                    
-                    # Display table dimensions
-                    st.info(f"**Table Dimensions:** {len(error_table)} anchors × {len(error_table.columns)} forecast horizons")
-                    
-                    # Format the table for better display
-                    styled_table = error_table.style.format("{:.2f}%").background_gradient(
-                        cmap='RdYlGn_r',  # Red-Yellow-Green reversed (red for high errors)
-                        subset=error_table.columns,
-                        vmin=0,
-                        vmax=30  # Cap gradient at 30% for better color distribution
-                    ).set_table_styles([
-                        {'selector': 'thead th', 'props': [('background-color', '#40466e'), ('color', 'white'), ('font-weight', 'bold')]},
-                        {'selector': 'tbody td', 'props': [('text-align', 'center')]},
-                        {'selector': 'th.row_heading', 'props': [('background-color', '#f0f2f6'), ('font-weight', 'bold')]}
-                    ])
-                    
-                    # Display the styled table
-                    st.dataframe(styled_table, use_container_width=True)
-                    
-                    # Summary statistics for the table
-                    with st.expander("📈 Table Summary Statistics"):
-                        col1, col2, col3, col4 = st.columns(4)
-                        
-                        # Calculate overall statistics
-                        all_errors = error_table.values.flatten()
-                        all_errors = all_errors[~pd.isna(all_errors)]  # Remove NaN values
-                        
-                        if len(all_errors) > 0:
-                            col1.metric("Mean Error", f"{np.mean(all_errors):.2f}%")
-                            col2.metric("Median Error", f"{np.median(all_errors):.2f}%")
-                            col3.metric("Max Error", f"{np.max(all_errors):.2f}%")
-                            col4.metric("Min Error", f"{np.min(all_errors):.2f}%")
-                            
-                            # Best and worst performing combinations
-                            st.markdown("**Performance Analysis:**")
-                            
-                            # Find best and worst anchor-horizon combinations
-                            flat_data = error_table.stack().reset_index()
-                            flat_data.columns = ['Anchor', 'Horizon', 'Error_%']
-                            
-                            best_combo = flat_data.loc[flat_data['Error_%'].idxmin()]
-                            worst_combo = flat_data.loc[flat_data['Error_%'].idxmax()]
-                            
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                st.success(f"**🏆 Best Performance**  \n{best_combo['Anchor']} @ {best_combo['Horizon']}  \n**{best_combo['Error_%']:.2f}%** error")
-                            with col2:
-                                st.error(f"**⚠️ Worst Performance**  \n{worst_combo['Anchor']} @ {worst_combo['Horizon']}  \n**{worst_combo['Error_%']:.2f}%** error")
-                            
-                            # Error distribution by horizon
-                            st.markdown("**Error by Forecast Horizon:**")
-                            horizon_stats = error_table.describe().T
-                            st.dataframe(horizon_stats.round(2), use_container_width=True)
-                        else:
-                            st.warning("No valid error data available for analysis.")
-                else:
-                    st.info("Generate forecasts first to view error percentage table.")
-
-                # --- Enhanced Evaluation Metrics ---
+                # --- Comprehensive Error Metrics by Horizon ---
                 st.markdown("#### 📈 Comprehensive Error Metrics by Horizon")
-                st.markdown("*Advanced performance metrics including MAE, RMSE, sMAPE, WAPE, and percentiles*")
+                st.markdown("*Performance metrics calculated from all forecast data points*")
                 
-                if len(unique_anchors) > 0 and len(forecast_df) > 0:
-                    # Configuration for MAPE threshold and filters
-                    col1, col2, col3 = st.columns(3)
+                # Configuration for MAPE threshold
+                col1, col2 = st.columns(2)
+                with col1:
+                    mape_threshold = st.number_input(
+                        "MAPE Threshold (kW)",
+                        min_value=0.0,
+                        value=200.0,
+                        step=10.0,
+                        help="Exclude rows where actual power < threshold from MAPE calculation"
+                    )
+                with col2:
+                    st.metric("Total Data Points", len(forecast_df), help="All forecast points used in analysis")
+                
+                # Calculate enhanced metrics per horizon
+                horizon_metrics = []
+                available_horizons = sorted(forecast_df["horizon_min"].unique())
+                
+                # Add APE column for analysis
+                forecast_df_analysis = forecast_df.copy()
+                forecast_df_analysis["ape"] = (forecast_df_analysis["abs_error_kW"] / forecast_df_analysis["P_actual_kW"]) * 100
+                
+                for horizon in available_horizons:
+                    horizon_data = forecast_df_analysis[forecast_df_analysis["horizon_min"] == horizon].copy()
+                    
+                    if len(horizon_data) > 0:
+                        # Filter for MAPE calculation (exclude low power values)
+                        mape_eligible = horizon_data[horizon_data["P_actual_kW"] >= mape_threshold]
+                        
+                        # MAE and RMSE in kW
+                        mae_kw = horizon_data["abs_error_kW"].mean()
+                        rmse_kw = np.sqrt((horizon_data["error_kW"] ** 2).mean())
+                        
+                        # MAPE (only for eligible data points)
+                        mape = mape_eligible["ape"].mean() if len(mape_eligible) > 0 else np.nan
+                        mape_count = len(mape_eligible)
+                        
+                        # sMAPE (Symmetric MAPE)
+                        smape_values = []
+                        for _, row in horizon_data.iterrows():
+                            actual = row["P_actual_kW"]
+                            forecast = row["P_hat_kW"]
+                            if actual != 0 or forecast != 0:
+                                smape_val = (abs(forecast - actual) / ((abs(actual) + abs(forecast)) / 2)) * 100
+                                smape_values.append(smape_val)
+                        smape = np.mean(smape_values) if smape_values else np.nan
+                        
+                        # WAPE (Weighted Absolute Percentage Error)
+                        total_abs_error = horizon_data["abs_error_kW"].sum()
+                        total_actual = horizon_data["P_actual_kW"].sum()
+                        wape = (total_abs_error / total_actual) * 100 if total_actual > 0 else np.nan
+                        
+                        # Percentiles of APE
+                        p50_ape = horizon_data["ape"].median()
+                        p90_ape = horizon_data["ape"].quantile(0.9)
+                        
+                        horizon_metrics.append({
+                            'Horizon (min)': horizon,
+                            'Count': len(horizon_data),
+                            'MAE (kW)': f"{mae_kw:.2f}",
+                            'RMSE (kW)': f"{rmse_kw:.2f}",
+                            'MAPE (%)': f"{mape:.2f}" if not np.isnan(mape) else "N/A",
+                            'MAPE Count': mape_count,
+                            'sMAPE (%)': f"{smape:.2f}" if not np.isnan(smape) else "N/A",
+                            'WAPE (%)': f"{wape:.2f}" if not np.isnan(wape) else "N/A",
+                            'P50 APE (%)': f"{p50_ape:.2f}",
+                            'P90 APE (%)': f"{p90_ape:.2f}"
+                        })
+                
+                if horizon_metrics:
+                    metrics_df = pd.DataFrame(horizon_metrics)
+                    
+                    # Display metrics table
+                    st.markdown("**📊 Error Metrics Summary:**")
+                    st.dataframe(metrics_df, use_container_width=True)
+                    
+                    # Visualizations
+                    st.markdown("**📈 Error Metrics Visualization:**")
+                    
+                    col1, col2 = st.columns(2)
+                    
                     with col1:
-                        mape_threshold = st.number_input(
-                            "MAPE Threshold (kW)",
-                            min_value=0.0,
-                            value=200.0,
-                            step=10.0,
-                            help="Exclude rows where actual power < threshold from MAPE calculation"
+                        # MAE and RMSE comparison
+                        fig_mae_rmse = go.Figure()
+                        fig_mae_rmse.add_trace(go.Bar(
+                            x=[f"{h} min" for h in available_horizons],
+                            y=[float(m['MAE (kW)']) for m in horizon_metrics],
+                            name='MAE (kW)',
+                            marker_color='lightblue'
+                        ))
+                        fig_mae_rmse.add_trace(go.Bar(
+                            x=[f"{h} min" for h in available_horizons],
+                            y=[float(m['RMSE (kW)']) for m in horizon_metrics],
+                            name='RMSE (kW)',
+                            marker_color='darkblue'
+                        ))
+                        fig_mae_rmse.update_layout(
+                            title="MAE vs RMSE by Horizon",
+                            xaxis_title="Forecast Horizon",
+                            yaxis_title="Error (kW)",
+                            barmode='group'
                         )
+                        st.plotly_chart(fig_mae_rmse, use_container_width=True)
                     
                     with col2:
-                        analysis_type = st.selectbox(
-                            "Analysis Type",
-                            ["Overall", "Time-of-Day", "ROC Regime", "Load Bands"],
-                            help="Choose how to segment the error analysis"
-                        )
-                    
-                    with col3:
-                        if analysis_type == "Load Bands":
-                            num_load_bands = st.slider(
-                                "Number of Load Bands",
-                                min_value=3,
-                                max_value=8,
-                                value=5,
-                                help="Number of equal-sized load bands to create"
-                            )
-                    
-                    # Prepare forecast data with additional features for segmentation
-                    enhanced_forecast_df = forecast_df.copy()
-                    enhanced_forecast_df["ape"] = (enhanced_forecast_df["abs_error_kW"] / enhanced_forecast_df["P_actual_kW"]) * 100
-                    
-                    # Add time-of-day information if datetime column exists
-                    if "datetime" in enhanced_forecast_df.columns:
-                        enhanced_forecast_df["hour"] = pd.to_datetime(enhanced_forecast_df["datetime"]).dt.hour
-                        enhanced_forecast_df["time_bucket"] = enhanced_forecast_df["hour"].apply(
-                            lambda h: "Night (0-6)" if 0 <= h < 6
-                            else "Morning (6-12)" if 6 <= h < 12
-                            else "Afternoon (12-18)" if 12 <= h < 18
-                            else "Evening (18-24)"
-                        )
-                    # Add time-of-day information if datetime column exists
-                    if "datetime" in enhanced_forecast_df.columns:
-                        enhanced_forecast_df["hour"] = pd.to_datetime(enhanced_forecast_df["datetime"]).dt.hour
-                        enhanced_forecast_df["time_bucket"] = enhanced_forecast_df["hour"].apply(
-                            lambda h: "Night (0-6)" if 0 <= h < 6
-                            else "Morning (6-12)" if 6 <= h < 12
-                            else "Afternoon (12-18)" if 12 <= h < 18
-                            else "Evening (18-24)"
-                        )
-                    else:
-                        enhanced_forecast_df["time_bucket"] = "Unknown"
-                    
-                    # Add ROC regime information (simplified approach)
-                    enhanced_forecast_df["roc_regime"] = "Calm"  # Default to Calm regime
-                    
-                    # Add load bands
-                    if analysis_type == "Load Bands":
-                        load_min = enhanced_forecast_df["P_actual_kW"].min()
-                        load_max = enhanced_forecast_df["P_actual_kW"].max()
-                        load_range = load_max - load_min
-                        band_size = load_range / num_load_bands
+                        # Percentage metrics comparison
+                        fig_percentage = go.Figure()
                         
-                        def get_load_band(power):
-                            band_num = min(int((power - load_min) / band_size) + 1, num_load_bands)
-                            band_start = load_min + (band_num - 1) * band_size
-                            band_end = load_min + band_num * band_size
-                            return f"Band {band_num}: {band_start:.0f}-{band_end:.0f} kW"
+                        # Only include non-NaN values
+                        mape_values = [float(m['MAPE (%)']) for m in horizon_metrics if m['MAPE (%)'] != 'N/A']
+                        smape_values = [float(m['sMAPE (%)']) for m in horizon_metrics if m['sMAPE (%)'] != 'N/A']
+                        wape_values = [float(m['WAPE (%)']) for m in horizon_metrics if m['WAPE (%)'] != 'N/A']
                         
-                        enhanced_forecast_df["load_band"] = enhanced_forecast_df["P_actual_kW"].apply(get_load_band)
-                    
-                    # Define segmentation based on analysis type
-                    if analysis_type == "Overall":
-                        segments = [("Overall", enhanced_forecast_df)]
-                    elif analysis_type == "Time-of-Day":
-                        segments = [(bucket, group) for bucket, group in enhanced_forecast_df.groupby("time_bucket")]
-                    elif analysis_type == "ROC Regime":
-                        segments = [(regime, group) for regime, group in enhanced_forecast_df.groupby("roc_regime")]
-                    elif analysis_type == "Load Bands":
-                        segments = [(band, group) for band, group in enhanced_forecast_df.groupby("load_band")]
-                    
-                    # Calculate enhanced metrics per segment and horizon
-                    def calculate_segment_metrics(segment_name, segment_data):
-                        segment_metrics = []
-                        available_horizons = sorted(segment_data["horizon_min"].unique())
+                        horizons_labels = [f"{h} min" for h in available_horizons]
                         
-                        for horizon in available_horizons:
-                            horizon_data = segment_data[segment_data["horizon_min"] == horizon].copy()
-                            
-                            if len(horizon_data) > 0:
-                                # Filter for MAPE calculation (exclude low power values)
-                                mape_eligible = horizon_data[horizon_data["P_actual_kW"] >= mape_threshold]
-                                
-                                # MAE and RMSE in kW
-                                mae_kw = horizon_data["abs_error_kW"].mean()
-                                rmse_kw = np.sqrt((horizon_data["error_kW"] ** 2).mean())
-                                
-                                # MAPE (only for eligible data points)
-                                mape = mape_eligible["ape"].mean() if len(mape_eligible) > 0 else np.nan
-                                mape_count = len(mape_eligible)
-                                
-                                # sMAPE (Symmetric MAPE)
-                                smape_values = []
-                                for _, row in horizon_data.iterrows():
-                                    actual = row["P_actual_kW"]
-                                    forecast = row["P_hat_kW"]
-                                    if actual != 0 or forecast != 0:
-                                        smape_val = (abs(forecast - actual) / ((abs(actual) + abs(forecast)) / 2)) * 100
-                                        smape_values.append(smape_val)
-                                smape = np.mean(smape_values) if smape_values else np.nan
-                                
-                                # WAPE (Weighted Absolute Percentage Error)
-                                total_abs_error = horizon_data["abs_error_kW"].sum()
-                                total_actual = horizon_data["P_actual_kW"].sum()
-                                wape = (total_abs_error / total_actual) * 100 if total_actual > 0 else np.nan
-                                
-                                # Percentiles of APE
-                                p50_ape = horizon_data["ape"].median()
-                                p90_ape = horizon_data["ape"].quantile(0.9)
-                                
-                                segment_metrics.append({
-                                    'Segment': segment_name,
-                                    'Horizon (min)': horizon,
-                                    'Count': len(horizon_data),
-                                    'MAE (kW)': f"{mae_kw:.1f}",
-                                    'RMSE (kW)': f"{rmse_kw:.1f}",
-                                    'MAPE (%)': f"{mape:.1f}" if not np.isnan(mape) else "N/A",
-                                    'sMAPE (%)': f"{smape:.1f}" if not np.isnan(smape) else "N/A",
-                                    'WAPE (%)': f"{wape:.1f}" if not np.isnan(wape) else "N/A",
-                                    'P50 APE (%)': f"{p50_ape:.1f}",
-                                    'P90 APE (%)': f"{p90_ape:.1f}"
-                                })
-                        
-                        return segment_metrics
-                    
-                    # Generate metrics for all segments
-                    all_segment_metrics = []
-                    for segment_name, segment_data in segments:
-                        segment_metrics = calculate_segment_metrics(segment_name, segment_data)
-                        all_segment_metrics.extend(segment_metrics)
-                    
-                    if all_segment_metrics:
-                        segment_metrics_df = pd.DataFrame(all_segment_metrics)
-                        
-                        # Display segmented metrics
-                        st.markdown(f"**📊 Error Metrics by {analysis_type}:**")
-                        
-                        # Show summary statistics
-                        if analysis_type != "Overall":
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                total_segments = len(segments)
-                                st.metric("Total Segments", total_segments)
-                            with col2:
-                                avg_count_per_segment = segment_metrics_df.groupby('Segment')['Count'].sum().mean()
-                                st.metric("Avg Points/Segment", f"{avg_count_per_segment:.0f}")
-                            with col3:
-                                total_points = segment_metrics_df['Count'].astype(int).sum()
-                                st.metric("Total Data Points", total_points)
-                        
-                        # Display compact tables per segment
-                        for segment_name, segment_data in segments:
-                            segment_subset = segment_metrics_df[segment_metrics_df['Segment'] == segment_name]
-                            if len(segment_subset) > 0:
-                                with st.expander(f"📋 {segment_name} ({len(segment_data)} points)", expanded=(analysis_type == "Overall")):
-                                    # Remove the Segment column for cleaner display
-                                    display_df = segment_subset.drop('Segment', axis=1)
-                                    st.dataframe(display_df, use_container_width=True)
-                                    
-                                    # Mini summary for this segment
-                                    if len(display_df) > 1:
-                                        avg_mae = pd.to_numeric(display_df['MAE (kW)'], errors='coerce').mean()
-                                        avg_rmse = pd.to_numeric(display_df['RMSE (kW)'], errors='coerce').mean()
-                                        st.caption(f"Segment Average: MAE {avg_mae:.1f} kW, RMSE {avg_rmse:.1f} kW")
-                        
-                        # Visualization for segmented analysis
-                        if analysis_type != "Overall" and len(segments) > 1:
-                            st.markdown("**📈 Segment Comparison Visualization:**")
-                            
-                            # Create comparison chart
-                            fig_segments = go.Figure()
-                            
-                            # Group by segment and calculate average metrics
-                            segment_summary = segment_metrics_df.groupby('Segment').agg({
-                                'MAE (kW)': lambda x: pd.to_numeric(x, errors='coerce').mean(),
-                                'RMSE (kW)': lambda x: pd.to_numeric(x, errors='coerce').mean(),
-                                'Count': lambda x: pd.to_numeric(x, errors='coerce').sum()
-                            }).reset_index()
-                            
-                            fig_segments.add_trace(go.Bar(
-                                x=segment_summary['Segment'],
-                                y=segment_summary['MAE (kW)'],
-                                name='Average MAE (kW)',
-                                marker_color='lightblue',
-                                yaxis='y'
+                        if mape_values:
+                            fig_percentage.add_trace(go.Scatter(
+                                x=horizons_labels[:len(mape_values)],
+                                y=mape_values,
+                                name='MAPE (%)',
+                                mode='lines+markers'
                             ))
-                            
-                            fig_segments.add_trace(go.Bar(
-                                x=segment_summary['Segment'],
-                                y=segment_summary['RMSE (kW)'],
-                                name='Average RMSE (kW)',
-                                marker_color='darkblue',
-                                yaxis='y'
+                        if smape_values:
+                            fig_percentage.add_trace(go.Scatter(
+                                x=horizons_labels[:len(smape_values)],
+                                y=smape_values,
+                                name='sMAPE (%)',
+                                mode='lines+markers'
                             ))
-                            
-                            # Add count as secondary axis
-                            fig_segments.add_trace(go.Scatter(
-                                x=segment_summary['Segment'],
-                                y=segment_summary['Count'],
-                                name='Data Points',
-                                mode='lines+markers',
-                                marker_color='red',
-                                yaxis='y2'
+                        if wape_values:
+                            fig_percentage.add_trace(go.Scatter(
+                                x=horizons_labels[:len(wape_values)],
+                                y=wape_values,
+                                name='WAPE (%)',
+                                mode='lines+markers'
                             ))
-                            
-                            fig_segments.update_layout(
-                                title=f"Error Metrics Comparison by {analysis_type}",
-                                xaxis_title="Segment",
-                                yaxis=dict(title="Error (kW)", side="left"),
-                                yaxis2=dict(title="Data Points", side="right", overlaying="y"),
-                                barmode='group'
-                            )
-                            
-                            st.plotly_chart(fig_segments, use_container_width=True)
                         
-                        # Download segmented metrics
-                        segment_csv = segment_metrics_df.to_csv(index=False)
-                        st.download_button(
-                            label=f"📥 Download {analysis_type} Metrics (CSV)",
-                            data=segment_csv,
-                            file_name=f"segmented_forecast_metrics_{analysis_type.lower().replace('-', '_').replace(' ', '_')}.csv",
-                            mime="text/csv"
+                        fig_percentage.update_layout(
+                            title="Percentage Error Metrics by Horizon",
+                            xaxis_title="Forecast Horizon",
+                            yaxis_title="Error (%)"
                         )
-                        
-                        # Add metric definitions
-                        with st.expander("� Metric Definitions"):
-                            st.markdown(f"""
-                            - **MAE (kW)**: Mean Absolute Error in kilowatts
-                            - **RMSE (kW)**: Root Mean Square Error in kilowatts  
-                            - **MAPE (%)**: Mean Absolute Percentage Error (excludes actual < {mape_threshold:.0f} kW)
-                            - **sMAPE (%)**: Symmetric Mean Absolute Percentage Error
-                            - **WAPE (%)**: Weighted Absolute Percentage Error
-                            - **P50/P90 APE (%)**: 50th/90th percentile of Absolute Percentage Error
-                            """)
+                        st.plotly_chart(fig_percentage, use_container_width=True)
                     
-                    else:
-                        st.warning("No segment data available for analysis.")
-                
+                    # APE Percentiles Chart
+                    st.markdown("**📊 APE Percentiles by Horizon:**")
+                    fig_ape = go.Figure()
+                    fig_ape.add_trace(go.Scatter(
+                        x=[f"{h} min" for h in available_horizons],
+                        y=[float(m['P50 APE (%)']) for m in horizon_metrics],
+                        name='P50 APE (%)',
+                        mode='lines+markers',
+                        marker_color='green'
+                    ))
+                    fig_ape.add_trace(go.Scatter(
+                        x=[f"{h} min" for h in available_horizons],
+                        y=[float(m['P90 APE (%)']) for m in horizon_metrics],
+                        name='P90 APE (%)',
+                        mode='lines+markers',
+                        marker_color='red'
+                    ))
+                    fig_ape.update_layout(
+                        title="APE Percentiles by Forecast Horizon",
+                        xaxis_title="Forecast Horizon",
+                        yaxis_title="APE (%)",
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02)
+                    )
+                    st.plotly_chart(fig_ape, use_container_width=True)
+                    
+                    # Metric definitions
+                    with st.expander("📖 Metric Definitions"):
+                        st.markdown(f"""
+                        - **MAE (kW)**: Mean Absolute Error in kilowatts
+                        - **RMSE (kW)**: Root Mean Square Error in kilowatts  
+                        - **MAPE (%)**: Mean Absolute Percentage Error (excludes actual < {mape_threshold:.0f} kW)
+                        - **sMAPE (%)**: Symmetric Mean Absolute Percentage Error
+                        - **WAPE (%)**: Weighted Absolute Percentage Error
+                        - **P50/P90 APE (%)**: 50th/90th percentile of Absolute Percentage Error
+                        - **MAPE Count**: Number of data points used in MAPE calculation
+                        """)
+                    
+                    # Download metrics
+                    metrics_csv = metrics_df.to_csv(index=False)
+                    st.download_button(
+                        label="📥 Download Error Metrics (CSV)",
+                        data=metrics_csv,
+                        file_name="comprehensive_forecast_metrics.csv",
+                        mime="text/csv"
+                    )
                 else:
-                    st.info("Generate forecasts first to view enhanced metrics.")
+                    st.warning("No forecast data available for metrics calculation.")
 
             # Basic power statistics
             st.subheader("⚡ Power Statistics")
