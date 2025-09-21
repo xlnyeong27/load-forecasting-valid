@@ -990,6 +990,253 @@ if uploaded_file:
                 
                 else:
                     st.warning("No forecast data available for metrics calculation.")
+                
+                # --- Download All Results ---
+                if len(forecast_df_analysis) > 0:
+                    st.markdown("#### 📥 Export Comprehensive Results")
+                    st.markdown("*Download complete error metrics dataset for all horizons and segments*")
+                    
+                    # Function to calculate enhanced segment metrics with bias
+                    def calculate_enhanced_segment_metrics(segment_df, segment_type, segment_label, horizon, mape_threshold):
+                        if len(segment_df) == 0:
+                            return None
+                        
+                        # Filter for MAPE calculation
+                        mape_eligible = segment_df[segment_df["P_actual_kW"] >= mape_threshold]
+                        
+                        # Calculate all metrics
+                        mae_kw = segment_df["abs_error_kW"].mean()
+                        rmse_kw = np.sqrt((segment_df["error_kW"] ** 2).mean())
+                        bias_kw = segment_df["error_kW"].mean()  # Mean error (bias)
+                        mape = mape_eligible["ape"].mean() if len(mape_eligible) > 0 else np.nan
+                        
+                        # sMAPE
+                        smape_values = []
+                        for _, row in segment_df.iterrows():
+                            actual = row["P_actual_kW"]
+                            forecast = row["P_hat_kW"]
+                            if actual != 0 or forecast != 0:
+                                smape_val = (abs(forecast - actual) / ((abs(actual) + abs(forecast)) / 2)) * 100
+                                smape_values.append(smape_val)
+                        smape = np.mean(smape_values) if smape_values else np.nan
+                        
+                        # WAPE
+                        total_abs_error = segment_df["abs_error_kW"].sum()
+                        total_actual = segment_df["P_actual_kW"].sum()
+                        wape = (total_abs_error / total_actual) * 100 if total_actual > 0 else np.nan
+                        
+                        # Percentiles
+                        p50_ape = segment_df["ape"].median()
+                        p90_ape = segment_df["ape"].quantile(0.9)
+                        
+                        return {
+                            'horizon_min': horizon,
+                            'segment_type': segment_type,
+                            'segment_label': segment_label,
+                            'count': len(segment_df),
+                            'mae_kw': mae_kw,
+                            'rmse_kw': rmse_kw,
+                            'mape_pct': mape,
+                            'smape_pct': smape,
+                            'wape_pct': wape,
+                            'bias_kw': bias_kw,
+                            'p50_pct': p50_ape,
+                            'p90_pct': p90_ape
+                        }
+                    
+                    # Build comprehensive results for all horizons and segments
+                    with st.spinner("Building comprehensive results dataset..."):
+                        all_results = []
+                        
+                        # Process each horizon
+                        for horizon in available_horizons:
+                            horizon_data = forecast_df_analysis[forecast_df_analysis["horizon_min"] == horizon].copy()
+                            
+                            if len(horizon_data) > 0:
+                                # Add timestamp column for time-based analysis
+                                horizon_data["hour"] = pd.to_datetime(horizon_data["anchor_ts"]).dt.hour
+                                
+                                # 1. Overall metrics (no segmentation)
+                                overall_result = calculate_enhanced_segment_metrics(
+                                    horizon_data, "Overall", "All Data", horizon, mape_threshold
+                                )
+                                if overall_result:
+                                    all_results.append(overall_result)
+                                
+                                # 2. Time-of-Day Buckets
+                                time_buckets = [
+                                    (0, 6, "Night (00-06)"),
+                                    (6, 12, "Morning (06-12)"),
+                                    (12, 18, "Afternoon (12-18)"),
+                                    (18, 24, "Evening (18-24)")
+                                ]
+                                
+                                for start_hour, end_hour, bucket_name in time_buckets:
+                                    bucket_data = horizon_data[
+                                        (horizon_data["hour"] >= start_hour) & (horizon_data["hour"] < end_hour)
+                                    ]
+                                    result = calculate_enhanced_segment_metrics(
+                                        bucket_data, "Time-of-Day", bucket_name, horizon, mape_threshold
+                                    )
+                                    if result:
+                                        all_results.append(result)
+                                
+                                # 3. Ramp vs Calm Regimes
+                                horizon_data_with_roc = horizon_data.merge(
+                                    roc_df[["Timestamp", "ROC (kW/min)"]], 
+                                    left_on="anchor_ts", 
+                                    right_on="Timestamp", 
+                                    how="left"
+                                )
+                                
+                                # Ramp regime
+                                ramp_data = horizon_data_with_roc[
+                                    (horizon_data_with_roc["ROC (kW/min)"].abs() > roc_threshold)
+                                ]
+                                ramp_result = calculate_enhanced_segment_metrics(
+                                    ramp_data, "ROC Regime", f"Ramp (|ROC| > {roc_threshold:.1f})", horizon, mape_threshold
+                                )
+                                if ramp_result:
+                                    all_results.append(ramp_result)
+                                
+                                # Calm regime
+                                calm_data = horizon_data_with_roc[
+                                    (horizon_data_with_roc["ROC (kW/min)"].abs() <= roc_threshold)
+                                ]
+                                calm_result = calculate_enhanced_segment_metrics(
+                                    calm_data, "ROC Regime", f"Calm (|ROC| ≤ {roc_threshold:.1f})", horizon, mape_threshold
+                                )
+                                if calm_result:
+                                    all_results.append(calm_result)
+                                
+                                # 4. Load Bands
+                                load_min = horizon_data["P_actual_kW"].min()
+                                load_max = horizon_data["P_actual_kW"].max()
+                                load_range = load_max - load_min
+                                
+                                load_bands = [
+                                    (load_min, load_min + 0.33 * load_range, "Low Load (0-33%)"),
+                                    (load_min + 0.33 * load_range, load_min + 0.67 * load_range, "Medium Load (33-67%)"),
+                                    (load_min + 0.67 * load_range, load_max, "High Load (67-100%)")
+                                ]
+                                
+                                for min_load, max_load, band_name in load_bands:
+                                    if band_name == "High Load (67-100%)":
+                                        band_data = horizon_data[
+                                            (horizon_data["P_actual_kW"] >= min_load) & (horizon_data["P_actual_kW"] <= max_load)
+                                        ]
+                                    else:
+                                        band_data = horizon_data[
+                                            (horizon_data["P_actual_kW"] >= min_load) & (horizon_data["P_actual_kW"] < max_load)
+                                        ]
+                                    
+                                    result = calculate_enhanced_segment_metrics(
+                                        band_data, "Load Band", f"{band_name} ({min_load:.0f}-{max_load:.0f} kW)", horizon, mape_threshold
+                                    )
+                                    if result:
+                                        all_results.append(result)
+                    
+                    # Create comprehensive results dataframe
+                    if all_results:
+                        comprehensive_df = pd.DataFrame(all_results)
+                        
+                        # Format for export
+                        export_df = comprehensive_df.copy()
+                        export_df = export_df.round({
+                            'mae_kw': 2,
+                            'rmse_kw': 2,
+                            'mape_pct': 2,
+                            'smape_pct': 2,
+                            'wape_pct': 2,
+                            'bias_kw': 2,
+                            'p50_pct': 2,
+                            'p90_pct': 2
+                        })
+                        
+                        # Display summary
+                        col1, col2, col3 = st.columns(3)
+                        col1.metric("Total Records", len(export_df))
+                        col2.metric("Horizons Analyzed", len(available_horizons))
+                        col3.metric("Segment Types", len(export_df['segment_type'].unique()))
+                        
+                        # Preview table
+                        st.markdown("**📋 Preview of Comprehensive Results:**")
+                        st.dataframe(export_df.head(10), use_container_width=True)
+                        
+                        # Download buttons
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            # CSV download
+                            csv_data = export_df.to_csv(index=False)
+                            st.download_button(
+                                label="📥 Download as CSV",
+                                data=csv_data,
+                                file_name="comprehensive_forecast_analysis.csv",
+                                mime="text/csv",
+                                help="Download complete results in CSV format"
+                            )
+                        
+                        with col2:
+                            # Excel download
+                            from io import BytesIO
+                            excel_buffer = BytesIO()
+                            
+                            # Create Excel with multiple sheets
+                            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                                # Main results sheet
+                                export_df.to_excel(writer, sheet_name='All_Results', index=False)
+                                
+                                # Summary by segment type
+                                summary_by_type = export_df.groupby(['segment_type', 'horizon_min']).agg({
+                                    'count': 'sum',
+                                    'mae_kw': 'mean',
+                                    'rmse_kw': 'mean',
+                                    'mape_pct': 'mean',
+                                    'bias_kw': 'mean'
+                                }).round(2).reset_index()
+                                summary_by_type.to_excel(writer, sheet_name='Summary_by_Type', index=False)
+                                
+                                # Metadata sheet
+                                metadata = pd.DataFrame({
+                                    'Parameter': ['MAPE_Threshold_kW', 'ROC_Threshold_kW_per_min', 'Total_Data_Points', 'Export_Timestamp'],
+                                    'Value': [mape_threshold, roc_threshold, len(forecast_df_analysis), pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')]
+                                })
+                                metadata.to_excel(writer, sheet_name='Metadata', index=False)
+                            
+                            excel_data = excel_buffer.getvalue()
+                            st.download_button(
+                                label="📊 Download as Excel",
+                                data=excel_data,
+                                file_name="comprehensive_forecast_analysis.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                help="Download complete results in Excel format with multiple sheets"
+                            )
+                        
+                        # Data dictionary
+                        with st.expander("📖 Data Dictionary"):
+                            st.markdown("""
+                            **Column Descriptions:**
+                            - **horizon_min**: Forecast horizon in minutes
+                            - **segment_type**: Type of segmentation (Overall, Time-of-Day, ROC Regime, Load Band)
+                            - **segment_label**: Specific segment name/description
+                            - **count**: Number of data points in segment
+                            - **mae_kw**: Mean Absolute Error in kilowatts
+                            - **rmse_kw**: Root Mean Square Error in kilowatts
+                            - **mape_pct**: Mean Absolute Percentage Error (excludes actual < threshold)
+                            - **smape_pct**: Symmetric Mean Absolute Percentage Error
+                            - **wape_pct**: Weighted Absolute Percentage Error
+                            - **bias_kw**: Mean error (positive = over-forecast, negative = under-forecast)
+                            - **p50_pct**: 50th percentile (median) of Absolute Percentage Error
+                            - **p90_pct**: 90th percentile of Absolute Percentage Error
+                            
+                            **Excel Sheets:**
+                            - **All_Results**: Complete tidy dataset with all metrics
+                            - **Summary_by_Type**: Aggregated results by segment type and horizon
+                            - **Metadata**: Analysis parameters and export information
+                            """)
+                    else:
+                        st.warning("No comprehensive results available for download.")
 
             # Basic power statistics
             st.subheader("⚡ Power Statistics")
