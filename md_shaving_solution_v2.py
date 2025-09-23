@@ -1333,7 +1333,130 @@ def render_md_shaving_v2():
                     except Exception as e:
                         st.error(f"❌ Error configuring tariff: {str(e)}")
                     
-                    # V2 Battery Controls
+                    # V2 Peak Events Analysis
+                    st.subheader("📊 V2 Peak Events Analysis")
+                    try:
+                        # Detect data interval using V2 function
+                        detected_interval_hours = _infer_interval_hours(df_processed.index)
+                        st.success(f"✅ Detected sampling interval: {int(round(detected_interval_hours * 60))} minutes")
+                        
+                        # Peak Events Detection (Automatic)
+                        peak_events = []
+                        try:
+                            with st.spinner("Detecting peak events..."):
+                                # Use the monthly targets from session state
+                                if 'v2_monthly_targets' in st.session_state:
+                                    monthly_targets = st.session_state['v2_monthly_targets']
+                                    # Get average target for events detection
+                                    avg_target = monthly_targets.mean()
+                                    
+                                    # Debug information
+                                    st.info(f"🔍 **Debug Info:**")
+                                    st.write(f"- Monthly targets shape: {monthly_targets.shape}")
+                                    st.write(f"- Average target: {avg_target:.2f} kW")
+                                    st.write(f"- Data shape: {df_processed.shape}")
+                                    st.write(f"- Power column: {power_col}")
+                                    st.write(f"- Detected interval: {detected_interval_hours:.4f} hours")
+                                    
+                                    # Get MD rate from selected tariff
+                                    total_md_rate = 0
+                                    if selected_tariff and isinstance(selected_tariff, dict):
+                                        rates = selected_tariff.get('Rates', {})
+                                        total_md_rate = rates.get('Capacity Rate', 0) + rates.get('Network Rate', 0)
+                                    
+                                    st.write(f"- Total MD rate: {total_md_rate} RM/kW")
+                                    
+                                    peak_events = _detect_peak_events(
+                                        df_processed, 
+                                        power_col, 
+                                        avg_target,  # Use average monthly target
+                                        total_md_rate,
+                                        detected_interval_hours,
+                                        selected_tariff
+                                    )
+                                    
+                                    st.write(f"- Peak events found: {len(peak_events) if peak_events else 0}")
+                                else:
+                                    st.error("❌ Monthly targets not calculated. Please calculate targets first.")
+                                    peak_events = []
+                        
+                            if peak_events and len(peak_events) > 0:
+                                st.success(f"✅ Detected {len(peak_events)} peak events")
+                                
+                                # Display peak events summary with correct field mapping
+                                events_summary = []
+                                for i, event in enumerate(peak_events):
+                                    events_summary.append({
+                                        "Event #": i + 1,
+                                        "Start Date": event.get('Start Date', 'N/A'),
+                                        "Start Time": event.get('Start Time', 'N/A'),
+                                        "Peak kW": f"{event.get('General Peak Load (kW)', 0):.2f}",
+                                        "Target kW": f"{avg_target:.2f}",
+                                        "Excess kW": f"{event.get('General Excess (kW)', 0):.2f}",
+                                        "Duration (min)": f"{event.get('Duration (min)', 0):.0f}",
+                                        "MD Cost Impact (RM)": f"{event.get('MD Cost Impact (RM)', 0):.2f}",
+                                        "Tariff Type": event.get('Tariff Type', 'N/A')
+                                    })
+                                
+                                st.dataframe(pd.DataFrame(events_summary), use_container_width=True)
+                            else:
+                                st.info("ℹ️ No peak events detected above the targets")
+                                
+                        except Exception as e:
+                            st.error(f"❌ Error detecting peak events: {str(e)}")
+                        
+                        # V2 Peak Events Timeline Visualization (Automatic)
+                        try:
+                            with st.spinner("Generating peak events timeline..."):
+                                # Create visualization using V2 timeline function
+                                fig = _render_v2_peak_events_timeline(
+                                    df_processed, 
+                                    power_col, 
+                                    selected_tariff, 
+                                    holidays,
+                                    target_method, 
+                                    shave_percent, 
+                                    target_percent, 
+                                    target_manual_kw, 
+                                    target_description
+                                )
+                                
+                                if fig:
+                                    st.plotly_chart(fig, use_container_width=True)
+                                    st.success("✅ Peak events timeline generated successfully!")
+                                else:
+                                    st.warning("⚠️ Timeline visualization not available")
+                                    
+                        except Exception as e:
+                            st.error(f"❌ Error generating timeline: {str(e)}")
+                            # Fallback: Use conditional demand line function
+                            try:
+                                st.info("🔄 Using alternative visualization...")
+                                fig = px.line()
+                                # Get targets from session state for fallback
+                                avg_target = 1000  # Default value
+                                if 'v2_monthly_targets' in st.session_state:
+                                    monthly_targets = st.session_state['v2_monthly_targets']
+                                    avg_target = monthly_targets.mean() if not monthly_targets.empty else 1000
+                                
+                                fig = create_conditional_demand_line_with_peak_logic(
+                                    fig, 
+                                    df_processed, 
+                                    power_col, 
+                                    avg_target,
+                                    selected_tariff, 
+                                    holidays, 
+                                    "Demand with Peak Logic"
+                                )
+                                st.plotly_chart(fig, use_container_width=True)
+                                st.success("✅ Alternative demand visualization generated!")
+                            except Exception as fallback_e:
+                                st.error(f"❌ Fallback visualization failed: {str(fallback_e)}")
+                        
+                    except Exception as e:
+                        st.error(f"❌ Error in peak events analysis: {str(e)}")
+                    
+                    # V2 Battery Configuration
                     st.subheader("🔋 V2 Battery Configuration")
                     try:
                         battery_config = _render_v2_battery_controls()
@@ -1344,129 +1467,6 @@ def render_md_shaving_v2():
                             # Display configuration summary
                             with st.expander("📋 Battery Configuration Summary"):
                                 st.json(battery_config)
-                            
-                            # V2 Peak Events Analysis
-                            st.subheader("📊 V2 Peak Events Analysis")
-                            try:
-                                # Detect data interval using V2 function
-                                detected_interval_hours = _infer_interval_hours(df_processed.index)
-                                st.success(f"✅ Detected sampling interval: {int(round(detected_interval_hours * 60))} minutes")
-                                
-                                # Peak Events Detection (Automatic)
-                                peak_events = []
-                                try:
-                                    with st.spinner("Detecting peak events..."):
-                                        # Use the monthly targets from session state
-                                        if 'v2_monthly_targets' in st.session_state:
-                                            monthly_targets = st.session_state['v2_monthly_targets']
-                                            # Get average target for events detection
-                                            avg_target = monthly_targets.mean()
-                                            
-                                            # Debug information
-                                            st.info(f"🔍 **Debug Info:**")
-                                            st.write(f"- Monthly targets shape: {monthly_targets.shape}")
-                                            st.write(f"- Average target: {avg_target:.2f} kW")
-                                            st.write(f"- Data shape: {df_processed.shape}")
-                                            st.write(f"- Power column: {power_col}")
-                                            st.write(f"- Detected interval: {detected_interval_hours:.4f} hours")
-                                            
-                                            # Get MD rate from selected tariff
-                                            total_md_rate = 0
-                                            if selected_tariff and isinstance(selected_tariff, dict):
-                                                rates = selected_tariff.get('Rates', {})
-                                                total_md_rate = rates.get('Capacity Rate', 0) + rates.get('Network Rate', 0)
-                                            
-                                            st.write(f"- Total MD rate: {total_md_rate} RM/kW")
-                                            
-                                            peak_events = _detect_peak_events(
-                                                df_processed, 
-                                                power_col, 
-                                                avg_target,  # Use average monthly target
-                                                total_md_rate,
-                                                detected_interval_hours,
-                                                selected_tariff
-                                            )
-                                            
-                                            st.write(f"- Peak events found: {len(peak_events) if peak_events else 0}")
-                                        else:
-                                            st.error("❌ Monthly targets not calculated. Please calculate targets first.")
-                                            peak_events = []
-                                    
-                                    if peak_events and len(peak_events) > 0:
-                                        st.success(f"✅ Detected {len(peak_events)} peak events")
-                                        
-                                        # Display peak events summary with correct field mapping
-                                        events_summary = []
-                                        for i, event in enumerate(peak_events):
-                                            events_summary.append({
-                                                "Event #": i + 1,
-                                                "Start Date": event.get('Start Date', 'N/A'),
-                                                "Start Time": event.get('Start Time', 'N/A'),
-                                                "Peak kW": f"{event.get('General Peak Load (kW)', 0):.2f}",
-                                                "Target kW": f"{avg_target:.2f}",
-                                                "Excess kW": f"{event.get('General Excess (kW)', 0):.2f}",
-                                                "Duration (min)": f"{event.get('Duration (min)', 0):.0f}",
-                                                "MD Cost Impact (RM)": f"{event.get('MD Cost Impact (RM)', 0):.2f}",
-                                                "Tariff Type": event.get('Tariff Type', 'N/A')
-                                            })
-                                        
-                                        st.dataframe(pd.DataFrame(events_summary), use_container_width=True)
-                                    else:
-                                        st.info("ℹ️ No peak events detected above the targets")
-                                        
-                                except Exception as e:
-                                    st.error(f"❌ Error detecting peak events: {str(e)}")
-                                
-                                # V2 Peak Events Timeline Visualization (Automatic)
-                                try:
-                                    with st.spinner("Generating peak events timeline..."):
-                                        # Create visualization using V2 timeline function
-                                        fig = _render_v2_peak_events_timeline(
-                                            df_processed, 
-                                            power_col, 
-                                            selected_tariff, 
-                                            holidays,
-                                            target_method, 
-                                            shave_percent, 
-                                            target_percent, 
-                                            target_manual_kw, 
-                                            target_description
-                                        )
-                                        
-                                        if fig:
-                                            st.plotly_chart(fig, use_container_width=True)
-                                            st.success("✅ Peak events timeline generated successfully!")
-                                        else:
-                                            st.warning("⚠️ Timeline visualization not available")
-                                            
-                                except Exception as e:
-                                    st.error(f"❌ Error generating timeline: {str(e)}")
-                                    # Fallback: Use conditional demand line function
-                                    try:
-                                        st.info("🔄 Using alternative visualization...")
-                                        fig = px.line()
-                                        # Get targets from session state for fallback
-                                        avg_target = 1000  # Default value
-                                        if 'v2_monthly_targets' in st.session_state:
-                                            monthly_targets = st.session_state['v2_monthly_targets']
-                                            avg_target = monthly_targets.mean() if not monthly_targets.empty else 1000
-                                        
-                                        fig = create_conditional_demand_line_with_peak_logic(
-                                            fig, 
-                                            df_processed, 
-                                            power_col, 
-                                            avg_target,
-                                            selected_tariff, 
-                                            holidays, 
-                                            "Demand with Peak Logic"
-                                        )
-                                        st.plotly_chart(fig, use_container_width=True)
-                                        st.success("✅ Alternative demand visualization generated!")
-                                    except Exception as fallback_e:
-                                        st.error(f"❌ Fallback visualization failed: {str(fallback_e)}")
-                                
-                            except Exception as e:
-                                st.error(f"❌ Error in peak events analysis: {str(e)}")
                             
                             # Additional V2 Analysis Features
                             st.info("🔄 **Additional V2 analysis features integrated and ready for testing.**")
@@ -1863,7 +1863,7 @@ def render_md_shaving_v2():
 # 
 # 
 def _render_v2_peak_events_timeline(df, power_col, selected_tariff, holidays, target_method, shave_percent, target_percent, target_manual_kw, target_description):
-    """Render the V2 Peak Events Timeline visualization with dynamic monthly-based targets."""
+    """Render the V2 Peak Events Timeline visualization with dynamic monthly-based targets and enhanced color logic."""
     
     try:
         # Calculate tariff-specific monthly targets using V2 functions
@@ -1872,20 +1872,29 @@ def _render_v2_peak_events_timeline(df, power_col, selected_tariff, holidays, ta
             target_method, shave_percent, target_percent, target_manual_kw
         )
         
-        # Create visualization
+        # Create visualization with enhanced color logic
         fig = go.Figure()
         
-        # Add original consumption line
-        fig.add_trace(go.Scatter(
-            x=df.index,
-            y=df[power_col],
-            mode='lines',
-            name='Power Consumption',
-            line=dict(color='blue', width=1),
-            opacity=0.7
-        ))
+        # Create a target series that maps monthly targets to the full dataframe index
+        target_series = pd.Series(index=df.index, dtype=float)
         
-        # Add monthly targets as horizontal lines
+        if not monthly_targets.empty:
+            for month_period, target_value in monthly_targets.items():
+                month_start = pd.Timestamp(month_period.start_time)
+                month_end = pd.Timestamp(month_period.end_time)
+                month_mask = (df.index >= month_start) & (df.index <= month_end)
+                target_series.loc[month_mask] = target_value
+        else:
+            # Fallback to a single target
+            avg_target = df[power_col].quantile(0.9)
+            target_series[:] = avg_target
+        
+        # Use V2 enhanced conditional demand line with dynamic monthly targets and color logic
+        fig = _create_v2_conditional_demand_line_with_dynamic_targets(
+            fig, df, power_col, target_series, selected_tariff, holidays, "Power Consumption"
+        )
+        
+        # Add monthly targets as horizontal lines for reference
         if not monthly_targets.empty:
             for month_period, target_value in monthly_targets.items():
                 month_start = pd.Timestamp(month_period.start_time)
@@ -1899,20 +1908,33 @@ def _render_v2_peak_events_timeline(df, power_col, selected_tariff, holidays, ta
                         y=[target_value, target_value],
                         mode='lines',
                         name=f'Target {month_period}',
-                        line=dict(color='red', width=2, dash='dash'),
-                        opacity=0.9,
+                        line=dict(color='orange', width=2, dash='dash'),
+                        opacity=0.7,
                         showlegend=False
                     ))
         
         # Update layout
         fig.update_layout(
-            title=f"V2 Peak Events Timeline - {tariff_type} ({enhanced_target_description})",
+            title=f"V2 Peak Events Timeline with Color Logic - {tariff_type} ({enhanced_target_description})",
             xaxis_title="Time",
             yaxis_title="Power (kW)",
             height=600,
             showlegend=True,
-            hovermode='x unified'
+            hovermode='x unified',
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
+            )
         )
+        
+        return fig
+        
+    except Exception as e:
+        st.error(f"Error in _render_v2_peak_events_timeline: {str(e)}")
+        return None
         
         return fig
         
@@ -5287,158 +5309,158 @@ def _render_v2_peak_events_timeline(df, power_col, selected_tariff, holidays, ta
 #             return 1000.0  # Safe fallback
 # 
 # 
-# def _create_v2_conditional_demand_line_with_dynamic_targets(fig, df, power_col, target_series, selected_tariff=None, holidays=None, trace_name="Original Demand"):
-#     """
-#     V2 ENHANCEMENT: Enhanced conditional coloring logic for Original Demand line with DYNAMIC monthly targets.
-#     Creates continuous line segments with different colors based on monthly target conditions.
-#     
-#     Key V2 Innovation: Uses dynamic monthly targets instead of static averaging for color decisions.
-#     
-#     Color Logic:
-#     - Red: Above monthly target during Peak Periods (based on selected tariff) - Direct MD cost impact
-#     - Green: Above monthly target during Off-Peak Periods - No MD cost impact  
-#     - Blue: Below monthly target (any time) - Within acceptable limits
-#     
-#     Args:
-#         fig: Plotly figure to add traces to
-#         df: Simulation dataframe
-#         power_col: Power column name
-#         target_series: V2's dynamic monthly target series (same index as df)
-#         selected_tariff: Tariff configuration for period classification
-#         holidays: Set of holiday dates
-#         trace_name: Name for the trace
-#         
-#     Returns:
-#         Modified plotly figure with colored demand line segments
-#     """
-#     from tariffs.peak_logic import is_peak_rp4, get_period_classification
-#     
-#     # Validate inputs
-#     if target_series is None or len(target_series) == 0:
-#         st.warning("⚠️ V2 Dynamic Coloring: target_series is empty, falling back to single average")
-#         # Fallback to V1 approach with average target
-#         avg_target = df[power_col].quantile(0.9)
-#         return create_conditional_demand_line_with_peak_logic(fig, df, power_col, avg_target, selected_tariff, holidays, trace_name)
-#     
-#     # Convert index to datetime if it's not already
-#     if not pd.api.types.is_datetime64_any_dtype(df.index):
-#         df_copy = df.copy()
-#         df_copy.index = pd.to_datetime(df.index)
-#     else:
-#         df_copy = df
-#     
-#     # Create a series with color classifications using DYNAMIC monthly targets
-#     df_copy = df_copy.copy()
-#     df_copy['color_class'] = ''
-#     
-#     for i in range(len(df_copy)):
-#         timestamp = df_copy.index[i]
-#         demand_value = df_copy.iloc[i][power_col]
-#         
-#         # V2 ENHANCEMENT: Get DYNAMIC monthly target for this specific timestamp
-#         if timestamp in target_series.index:
-#             current_target = target_series.loc[timestamp]
-#         else:
-#             # Fallback to closest available target
-#             month_period = timestamp.to_period('M')
-#             available_periods = [t.to_period('M') for t in target_series.index if not pd.isna(target_series.loc[t])]
-#             if available_periods:
-#                 closest_period_timestamp = min(target_series.index, 
-#                                              key=lambda t: abs((timestamp - t).total_seconds()))
-#                 current_target = target_series.loc[closest_period_timestamp]
-#             else:
-#                 current_target = df[power_col].quantile(0.9)  # Safe fallback
-#         
-#         # Get MD window classification using RP4 2-period system
-#         is_md = is_md_window(timestamp, holidays)
-#         period_type = 'Peak' if is_md else 'Off-Peak'
-#         
-#         # V2 LOGIC: Color classification using dynamic monthly target
-#         if demand_value > current_target:
-#             if period_type == 'Peak':
-#                 df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'red'
-#             else:
-#                 df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'green'
-#         else:
-#             df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'blue'
-#     
-#     # Create continuous line segments with color-coded segments
-#     x_data = df_copy.index
-#     y_data = df_copy[power_col]
-#     colors = df_copy['color_class']
-#     
-#     # Track legend status
-#     legend_added = {'red': False, 'green': False, 'blue': False}
-#     
-#     # Create continuous line segments by color groups with bridge points
-#     i = 0
-#     while i < len(df_copy):
-#         current_color = colors.iloc[i]
-#         
-#         # Find the end of current color segment
-#         j = i
-#         while j < len(colors) and colors.iloc[j] == current_color:
-#             j += 1
-#         
-#         # Extract segment data
-#         segment_x = list(x_data[i:j])
-#         segment_y = list(y_data[i:j])
-#         
-#         # Add bridge points for better continuity (connect to adjacent segments)
-#         if i > 0:  # Add connection point from previous segment
-#             segment_x.insert(0, x_data[i-1])
-#             segment_y.insert(0, y_data[i-1])
-#         
-#         if j < len(colors):  # Add connection point to next segment
-#             segment_x.append(x_data[j])
-#             segment_y.append(y_data[j])
-#         
-#         # Determine trace name based on color and tariff type
-#         tariff_description = _get_tariff_description(selected_tariff) if selected_tariff else "RP4 Peak Period"
-#         
-#         # Check if it's a TOU tariff for enhanced hover info
-#         is_tou = False
-#         if selected_tariff:
-#             tariff_type = selected_tariff.get('Type', '').lower()
-#             tariff_name = selected_tariff.get('Tariff', '').lower()
-#             is_tou = tariff_type == 'tou' or 'tou' in tariff_name
-#         
-#         if current_color == 'red':
-#             segment_name = f'{trace_name} (Above Target - {tariff_description})'
-#             if is_tou:
-#                 hover_info = f'<b>Above Monthly Target - TOU Peak Rate Period</b><br><i>High Energy Cost + MD Cost Impact</i><br><i>Using V2 Dynamic Monthly Targets</i>'
-#             else:
-#                 hover_info = f'<b>Above Monthly Target - General Tariff</b><br><i>MD Cost Impact Only (Flat Energy Rate)</i><br><i>Using V2 Dynamic Monthly Targets</i>'
-#         elif current_color == 'green':
-#             segment_name = f'{trace_name} (Above Target - Off-Peak)'
-#             if is_tou:
-#                 hover_info = '<b>Above Monthly Target - TOU Off-Peak</b><br><i>Low Energy Cost, No MD Impact</i><br><i>Using V2 Dynamic Monthly Targets</i>'
-#             else:
-#                 hover_info = '<b>Above Monthly Target - General Tariff</b><br><i>This should not appear for General tariffs</i><br><i>Using V2 Dynamic Monthly Targets</i>'
-#         else:  # blue
-#             segment_name = f'{trace_name} (Below Target)'
-#             hover_info = '<b>Below Monthly Target</b><br><i>Within Acceptable Limits</i><br><i>Using V2 Dynamic Monthly Targets</i>'
-#         
-#         # Only show legend for the first occurrence of each color
-#         show_legend = not legend_added[current_color]
-#         legend_added[current_color] = True
-#         
-#         # Add line segment
-#         fig.add_trace(go.Scatter(
-#             x=segment_x,
-#             y=segment_y,
-#             mode='lines',
-#             line=dict(color=current_color, width=2),
-#             name=segment_name,
-#             hovertemplate=f'{trace_name}: %{{y:.2f}} kW<br>%{{x}}<br>{hover_info}<extra></extra>',
-#             showlegend=show_legend,
-#             legendgroup=current_color,
-#             connectgaps=True  # Connect gaps within segments
-#         ))
-#         
-#         i = j
-#     
-#     return fig
+def _create_v2_conditional_demand_line_with_dynamic_targets(fig, df, power_col, target_series, selected_tariff=None, holidays=None, trace_name="Original Demand"):
+    """
+    V2 ENHANCEMENT: Enhanced conditional coloring logic for Original Demand line with DYNAMIC monthly targets.
+    Creates continuous line segments with different colors based on monthly target conditions.
+    
+    Key V2 Innovation: Uses dynamic monthly targets instead of static averaging for color decisions.
+    
+    Color Logic:
+    - Red: Above monthly target during Peak Periods (based on selected tariff) - Direct MD cost impact
+    - Green: Above monthly target during Off-Peak Periods - No MD cost impact  
+    - Blue: Below monthly target (any time) - Within acceptable limits
+    
+    Args:
+        fig: Plotly figure to add traces to
+        df: Simulation dataframe
+        power_col: Power column name
+        target_series: V2's dynamic monthly target series (same index as df)
+        selected_tariff: Tariff configuration for period classification
+        holidays: Set of holiday dates
+        trace_name: Name for the trace
+        
+    Returns:
+        Modified plotly figure with colored demand line segments
+    """
+    from tariffs.peak_logic import is_peak_rp4, get_period_classification
+    
+    # Validate inputs
+    if target_series is None or len(target_series) == 0:
+        st.warning("⚠️ V2 Dynamic Coloring: target_series is empty, falling back to single average")
+        # Fallback to V1 approach with average target
+        avg_target = df[power_col].quantile(0.9)
+        return create_conditional_demand_line_with_peak_logic(fig, df, power_col, avg_target, selected_tariff, holidays, trace_name)
+    
+    # Convert index to datetime if it's not already
+    if not pd.api.types.is_datetime64_any_dtype(df.index):
+        df_copy = df.copy()
+        df_copy.index = pd.to_datetime(df.index)
+    else:
+        df_copy = df
+    
+    # Create a series with color classifications using DYNAMIC monthly targets
+    df_copy = df_copy.copy()
+    df_copy['color_class'] = ''
+    
+    for i in range(len(df_copy)):
+        timestamp = df_copy.index[i]
+        demand_value = df_copy.iloc[i][power_col]
+        
+        # V2 ENHANCEMENT: Get DYNAMIC monthly target for this specific timestamp
+        if timestamp in target_series.index:
+            current_target = target_series.loc[timestamp]
+        else:
+            # Fallback to closest available target
+            month_period = timestamp.to_period('M')
+            available_periods = [t.to_period('M') for t in target_series.index if not pd.isna(target_series.loc[t])]
+            if available_periods:
+                closest_period_timestamp = min(target_series.index, 
+                                             key=lambda t: abs((timestamp - t).total_seconds()))
+                current_target = target_series.loc[closest_period_timestamp]
+            else:
+                current_target = df[power_col].quantile(0.9)  # Safe fallback
+        
+        # Get MD window classification using RP4 2-period system
+        is_md = is_peak_rp4(timestamp, holidays)
+        period_type = 'Peak' if is_md else 'Off-Peak'
+        
+        # V2 LOGIC: Color classification using dynamic monthly target
+        if demand_value > current_target:
+            if period_type == 'Peak':
+                df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'red'
+            else:
+                df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'green'
+        else:
+            df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'blue'
+    
+    # Create continuous line segments with color-coded segments
+    x_data = df_copy.index
+    y_data = df_copy[power_col]
+    colors = df_copy['color_class']
+    
+    # Track legend status
+    legend_added = {'red': False, 'green': False, 'blue': False}
+    
+    # Create continuous line segments by color groups with bridge points
+    i = 0
+    while i < len(df_copy):
+        current_color = colors.iloc[i]
+        
+        # Find the end of current color segment
+        j = i
+        while j < len(colors) and colors.iloc[j] == current_color:
+            j += 1
+        
+        # Extract segment data
+        segment_x = list(x_data[i:j])
+        segment_y = list(y_data[i:j])
+        
+        # Add bridge points for better continuity (connect to adjacent segments)
+        if i > 0:  # Add connection point from previous segment
+            segment_x.insert(0, x_data[i-1])
+            segment_y.insert(0, y_data[i-1])
+        
+        if j < len(colors):  # Add connection point to next segment
+            segment_x.append(x_data[j])
+            segment_y.append(y_data[j])
+        
+        # Determine trace name based on color and tariff type
+        tariff_description = _get_tariff_description(selected_tariff) if selected_tariff else "RP4 Peak Period"
+        
+        # Check if it's a TOU tariff for enhanced hover info
+        is_tou = False
+        if selected_tariff:
+            tariff_type = selected_tariff.get('Type', '').lower()
+            tariff_name = selected_tariff.get('Tariff', '').lower()
+            is_tou = tariff_type == 'tou' or 'tou' in tariff_name
+        
+        if current_color == 'red':
+            segment_name = f'{trace_name} (Above Target - {tariff_description})'
+            if is_tou:
+                hover_info = f'<b>Above Monthly Target - TOU Peak Rate Period</b><br><i>High Energy Cost + MD Cost Impact</i><br><i>Using V2 Dynamic Monthly Targets</i>'
+            else:
+                hover_info = f'<b>Above Monthly Target - General Tariff</b><br><i>MD Cost Impact Only (Flat Energy Rate)</i><br><i>Using V2 Dynamic Monthly Targets</i>'
+        elif current_color == 'green':
+            segment_name = f'{trace_name} (Above Target - Off-Peak)'
+            if is_tou:
+                hover_info = '<b>Above Monthly Target - TOU Off-Peak</b><br><i>Low Energy Cost, No MD Impact</i><br><i>Using V2 Dynamic Monthly Targets</i>'
+            else:
+                hover_info = '<b>Above Monthly Target - General Tariff</b><br><i>This should not appear for General tariffs</i><br><i>Using V2 Dynamic Monthly Targets</i>'
+        else:  # blue
+            segment_name = f'{trace_name} (Below Target)'
+            hover_info = '<b>Below Monthly Target</b><br><i>Within Acceptable Limits</i><br><i>Using V2 Dynamic Monthly Targets</i>'
+        
+        # Only show legend for the first occurrence of each color
+        show_legend = not legend_added[current_color]
+        legend_added[current_color] = True
+        
+        # Add line segment
+        fig.add_trace(go.Scatter(
+            x=segment_x,
+            y=segment_y,
+            mode='lines',
+            line=dict(color=current_color, width=2),
+            name=segment_name,
+            hovertemplate=f'{trace_name}: %{{y:.2f}} kW<br>%{{x}}<br>{hover_info}<extra></extra>',
+            showlegend=show_legend,
+            legendgroup=current_color,
+            connectgaps=True  # Connect gaps within segments
+        ))
+        
+        i = j
+    
+    return fig
 # 
 # 
 # # ==========================================
