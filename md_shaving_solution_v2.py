@@ -1274,50 +1274,55 @@ def render_md_shaving_v2():
                                 elif target_method == "Manual Target (kW)":
                                     target_manual_kw = st.number_input("Manual Target (kW)", min_value=0.0, value=1000.0, step=10.0)
                                 
-                                # Calculate monthly targets
-                                if st.button("🎯 Calculate V2 Monthly Targets", type="primary"):
-                                    try:
-                                        # Validate inputs before calculation
-                                        if target_method == "Percentage to Shave" and shave_percent is None:
-                                            st.error("❌ Please set the shave percentage")
-                                        elif target_method == "Percentage of Current Max" and target_percent is None:
-                                            st.error("❌ Please set the target percentage")
-                                        elif target_method == "Manual Target (kW)" and target_manual_kw is None:
-                                            st.error("❌ Please set the manual target value")
-                                        else:
-                                            with st.spinner("Calculating V2 monthly targets..."):
-                                                monthly_targets, reference_peaks, calc_tariff_type, target_description = _calculate_monthly_targets_v2(
-                                                    df_processed, power_col, selected_tariff, holidays,
-                                                    target_method, shave_percent, target_percent, target_manual_kw
-                                                )
-                                            
-                                            st.success("✅ V2 Monthly targets calculated successfully!")
-                                            
-                                            # Display results
-                                            col1, col2 = st.columns(2)
-                                            
-                                            with col1:
-                                                st.subheader("🎯 Monthly Targets")
-                                                st.info(f"**Method:** {target_method}")
-                                                st.info(f"**Tariff Type:** {calc_tariff_type}")
-                                                st.info(f"**Description:** {target_description}")
-                                                
-                                                if not monthly_targets.empty:
-                                                    st.dataframe(monthly_targets, use_container_width=True)
-                                                else:
-                                                    st.warning("No monthly targets generated")
-                                            
-                                            with col2:
-                                                st.subheader("📊 Reference Peaks")
-                                                if not reference_peaks.empty:
-                                                    st.dataframe(reference_peaks, use_container_width=True)
-                                                else:
-                                                    st.warning("No reference peaks available")
+                                # Calculate monthly targets (Automatic)
+                                try:
+                                    # Validate inputs before calculation
+                                    if target_method == "Percentage to Shave" and shave_percent is None:
+                                        st.error("❌ Please set the shave percentage")
+                                    elif target_method == "Percentage of Current Max" and target_percent is None:
+                                        st.error("❌ Please set the target percentage")
+                                    elif target_method == "Manual Target (kW)" and target_manual_kw is None:
+                                        st.error("❌ Please set the manual target value")
+                                    else:
+                                        with st.spinner("Calculating V2 monthly targets..."):
+                                            monthly_targets, reference_peaks, calc_tariff_type, target_description = _calculate_monthly_targets_v2(
+                                                df_processed, power_col, selected_tariff, holidays,
+                                                target_method, shave_percent, target_percent, target_manual_kw
+                                            )
                                         
-                                    except Exception as e:
-                                        st.error(f"❌ Error calculating V2 monthly targets: {str(e)}")
-                                        # Add debug information
-                                        st.error(f"Debug info - target_method: {target_method}, shave_percent: {shave_percent}, target_percent: {target_percent}, target_manual_kw: {target_manual_kw}")
+                                        st.success("✅ V2 Monthly targets calculated successfully!")
+                                        
+                                        # Store in session state for use in other functions
+                                        st.session_state['v2_monthly_targets'] = monthly_targets
+                                        st.session_state['v2_reference_peaks'] = reference_peaks
+                                        st.session_state['v2_tariff_type'] = calc_tariff_type
+                                        st.session_state['v2_target_description'] = target_description
+                                        
+                                        # Display results
+                                        col1, col2 = st.columns(2)
+                                        
+                                        with col1:
+                                            st.subheader("🎯 Monthly Targets")
+                                            st.info(f"**Method:** {target_method}")
+                                            st.info(f"**Tariff Type:** {calc_tariff_type}")
+                                            st.info(f"**Description:** {target_description}")
+                                            
+                                            if not monthly_targets.empty:
+                                                st.dataframe(monthly_targets, use_container_width=True)
+                                            else:
+                                                st.warning("No monthly targets generated")
+                                        
+                                        with col2:
+                                            st.subheader("📊 Reference Peaks")
+                                            if not reference_peaks.empty:
+                                                st.dataframe(reference_peaks, use_container_width=True)
+                                            else:
+                                                st.warning("No reference peaks available")
+                                    
+                                except Exception as e:
+                                    st.error(f"❌ Error calculating V2 monthly targets: {str(e)}")
+                                    # Add debug information
+                                    st.error(f"Debug info - target_method: {target_method}, shave_percent: {shave_percent}, target_percent: {target_percent}, target_manual_kw: {target_manual_kw}")
                                 
                             except Exception as e:
                                 st.error(f"❌ Error calculating monthly peaks: {str(e)}")
@@ -1339,10 +1344,132 @@ def render_md_shaving_v2():
                             # Display configuration summary
                             with st.expander("📋 Battery Configuration Summary"):
                                 st.json(battery_config)
+                            
+                            # V2 Peak Events Analysis
+                            st.subheader("📊 V2 Peak Events Analysis")
+                            try:
+                                # Detect data interval using V2 function
+                                detected_interval_hours = _infer_interval_hours(df_processed.index)
+                                st.success(f"✅ Detected sampling interval: {int(round(detected_interval_hours * 60))} minutes")
                                 
-                            # Here you could add more V2 analysis functionality
-                            # when the commented sections are uncommented
-                            st.info("🔄 **Additional V2 analysis features available when dependencies are resolved.**")
+                                # Peak Events Detection (Automatic)
+                                peak_events = []
+                                try:
+                                    with st.spinner("Detecting peak events..."):
+                                        # Use the monthly targets from session state
+                                        if 'v2_monthly_targets' in st.session_state:
+                                            monthly_targets = st.session_state['v2_monthly_targets']
+                                            # Get average target for events detection
+                                            avg_target = monthly_targets.mean()
+                                            
+                                            # Debug information
+                                            st.info(f"🔍 **Debug Info:**")
+                                            st.write(f"- Monthly targets shape: {monthly_targets.shape}")
+                                            st.write(f"- Average target: {avg_target:.2f} kW")
+                                            st.write(f"- Data shape: {df_processed.shape}")
+                                            st.write(f"- Power column: {power_col}")
+                                            st.write(f"- Detected interval: {detected_interval_hours:.4f} hours")
+                                            
+                                            # Get MD rate from selected tariff
+                                            total_md_rate = 0
+                                            if selected_tariff and isinstance(selected_tariff, dict):
+                                                rates = selected_tariff.get('Rates', {})
+                                                total_md_rate = rates.get('Capacity Rate', 0) + rates.get('Network Rate', 0)
+                                            
+                                            st.write(f"- Total MD rate: {total_md_rate} RM/kW")
+                                            
+                                            peak_events = _detect_peak_events(
+                                                df_processed, 
+                                                power_col, 
+                                                avg_target,  # Use average monthly target
+                                                total_md_rate,
+                                                detected_interval_hours,
+                                                selected_tariff
+                                            )
+                                            
+                                            st.write(f"- Peak events found: {len(peak_events) if peak_events else 0}")
+                                        else:
+                                            st.error("❌ Monthly targets not calculated. Please calculate targets first.")
+                                            peak_events = []
+                                    
+                                    if peak_events and len(peak_events) > 0:
+                                        st.success(f"✅ Detected {len(peak_events)} peak events")
+                                        
+                                        # Display peak events summary with correct field mapping
+                                        events_summary = []
+                                        for i, event in enumerate(peak_events):
+                                            events_summary.append({
+                                                "Event #": i + 1,
+                                                "Start Date": event.get('Start Date', 'N/A'),
+                                                "Start Time": event.get('Start Time', 'N/A'),
+                                                "Peak kW": f"{event.get('General Peak Load (kW)', 0):.2f}",
+                                                "Target kW": f"{avg_target:.2f}",
+                                                "Excess kW": f"{event.get('General Excess (kW)', 0):.2f}",
+                                                "Duration (min)": f"{event.get('Duration (min)', 0):.0f}",
+                                                "MD Cost Impact (RM)": f"{event.get('MD Cost Impact (RM)', 0):.2f}",
+                                                "Tariff Type": event.get('Tariff Type', 'N/A')
+                                            })
+                                        
+                                        st.dataframe(pd.DataFrame(events_summary), use_container_width=True)
+                                    else:
+                                        st.info("ℹ️ No peak events detected above the targets")
+                                        
+                                except Exception as e:
+                                    st.error(f"❌ Error detecting peak events: {str(e)}")
+                                
+                                # V2 Peak Events Timeline Visualization (Automatic)
+                                try:
+                                    with st.spinner("Generating peak events timeline..."):
+                                        # Create visualization using V2 timeline function
+                                        fig = _render_v2_peak_events_timeline(
+                                            df_processed, 
+                                            power_col, 
+                                            selected_tariff, 
+                                            holidays,
+                                            target_method, 
+                                            shave_percent, 
+                                            target_percent, 
+                                            target_manual_kw, 
+                                            target_description
+                                        )
+                                        
+                                        if fig:
+                                            st.plotly_chart(fig, use_container_width=True)
+                                            st.success("✅ Peak events timeline generated successfully!")
+                                        else:
+                                            st.warning("⚠️ Timeline visualization not available")
+                                            
+                                except Exception as e:
+                                    st.error(f"❌ Error generating timeline: {str(e)}")
+                                    # Fallback: Use conditional demand line function
+                                    try:
+                                        st.info("🔄 Using alternative visualization...")
+                                        fig = px.line()
+                                        # Get targets from session state for fallback
+                                        avg_target = 1000  # Default value
+                                        if 'v2_monthly_targets' in st.session_state:
+                                            monthly_targets = st.session_state['v2_monthly_targets']
+                                            avg_target = monthly_targets.mean() if not monthly_targets.empty else 1000
+                                        
+                                        fig = create_conditional_demand_line_with_peak_logic(
+                                            fig, 
+                                            df_processed, 
+                                            power_col, 
+                                            avg_target,
+                                            selected_tariff, 
+                                            holidays, 
+                                            "Demand with Peak Logic"
+                                        )
+                                        st.plotly_chart(fig, use_container_width=True)
+                                        st.success("✅ Alternative demand visualization generated!")
+                                    except Exception as fallback_e:
+                                        st.error(f"❌ Fallback visualization failed: {str(fallback_e)}")
+                                
+                            except Exception as e:
+                                st.error(f"❌ Error in peak events analysis: {str(e)}")
+                            
+                            # Additional V2 Analysis Features
+                            st.info("🔄 **Additional V2 analysis features integrated and ready for testing.**")
                                 
                         else:
                             st.info("💡 Configure battery settings above to see the V2 functionality.")
@@ -1735,7 +1862,63 @@ def render_md_shaving_v2():
 #         st.error("Power column not found in data")
 # 
 # 
-# def _render_v2_peak_events_timeline(df, power_col, selected_tariff, holidays, target_method, shave_percent, target_percent, target_manual_kw, target_description):
+def _render_v2_peak_events_timeline(df, power_col, selected_tariff, holidays, target_method, shave_percent, target_percent, target_manual_kw, target_description):
+    """Render the V2 Peak Events Timeline visualization with dynamic monthly-based targets."""
+    
+    try:
+        # Calculate tariff-specific monthly targets using V2 functions
+        monthly_targets, reference_peaks, tariff_type, enhanced_target_description = _calculate_monthly_targets_v2(
+            df, power_col, selected_tariff, holidays, 
+            target_method, shave_percent, target_percent, target_manual_kw
+        )
+        
+        # Create visualization
+        fig = go.Figure()
+        
+        # Add original consumption line
+        fig.add_trace(go.Scatter(
+            x=df.index,
+            y=df[power_col],
+            mode='lines',
+            name='Power Consumption',
+            line=dict(color='blue', width=1),
+            opacity=0.7
+        ))
+        
+        # Add monthly targets as horizontal lines
+        if not monthly_targets.empty:
+            for month_period, target_value in monthly_targets.items():
+                month_start = pd.Timestamp(month_period.start_time)
+                month_end = pd.Timestamp(month_period.end_time)
+                month_mask = (df.index >= month_start) & (df.index <= month_end)
+                month_data = df[month_mask]
+                
+                if not month_data.empty:
+                    fig.add_trace(go.Scatter(
+                        x=[month_data.index[0], month_data.index[-1]],
+                        y=[target_value, target_value],
+                        mode='lines',
+                        name=f'Target {month_period}',
+                        line=dict(color='red', width=2, dash='dash'),
+                        opacity=0.9,
+                        showlegend=False
+                    ))
+        
+        # Update layout
+        fig.update_layout(
+            title=f"V2 Peak Events Timeline - {tariff_type} ({enhanced_target_description})",
+            xaxis_title="Time",
+            yaxis_title="Power (kW)",
+            height=600,
+            showlegend=True,
+            hovermode='x unified'
+        )
+        
+        return fig
+        
+    except Exception as e:
+        st.error(f"Error in V2 timeline rendering: {str(e)}")
+        return None
 #     """Render the V2 Peak Events Timeline visualization with dynamic monthly-based targets."""
 #     
 #     st.markdown("## 6. 📊 Peak Events Timeline")
