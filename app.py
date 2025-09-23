@@ -1,1278 +1,144 @@
-# Fresh start - Load Forecasting MVP
+# Main Energy Analytics Platform
 import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.graph_objs as go
-from datetime import datetime, timedelta
 import warnings
+import sys
+import os
 
 warnings.filterwarnings('ignore')
 
-# Chart functions
-def _create_demand_chart(df_processed, power_col):
-    """Create line chart of actual kW over time."""
-    fig = go.Figure()
-    
-    fig.add_trace(go.Scatter(
-        x=df_processed.index,
-        y=df_processed[power_col],
-        mode='lines',
-        name='Power Demand',
-        line=dict(color='blue', width=2),
-        hovertemplate='Time: %{x}<br>Power: %{y:.2f} kW<extra></extra>'
-    ))
-    
-    fig.update_layout(
-        title='Power Demand Over Time',
-        xaxis_title='Time',
-        yaxis_title='Power (kW)',
-        height=400,
-        hovermode='x unified'
-    )
-    
-    return fig
-
-def _create_roc_chart(roc_df, threshold_kw_per_min):
-    """Create ROC chart with threshold guides."""
-    fig = go.Figure()
-    
-    # ROC line
-    fig.add_trace(go.Scatter(
-        x=roc_df['Timestamp'],
-        y=roc_df['ROC (kW/min)'],
-        mode='lines',
-        name='Rate of Change',
-        line=dict(color='green', width=2),
-        hovertemplate='Time: %{x}<br>ROC: %{y:.3f} kW/min<extra></extra>'
-    ))
-    
-    # Positive threshold line
-    fig.add_hline(
-        y=threshold_kw_per_min,
-        line_dash="dash",
-        line_color="red",
-        annotation_text=f"+{threshold_kw_per_min} kW/min threshold",
-        annotation_position="top left"
-    )
-    
-    # Negative threshold line
-    fig.add_hline(
-        y=-threshold_kw_per_min,
-        line_dash="dash",
-        line_color="red",
-        annotation_text=f"-{threshold_kw_per_min} kW/min threshold",
-        annotation_position="bottom left"
-    )
-    
-    # Zero line
-    fig.add_hline(
-        y=0,
-        line_dash="dot",
-        line_color="gray",
-        opacity=0.5
-    )
-    
-    fig.update_layout(
-        title=f'Rate of Change (ROC) with ±{threshold_kw_per_min} kW/min Thresholds',
-        xaxis_title='Time',
-        yaxis_title='ROC (kW/min)',
-        height=400,
-        hovermode='x unified'
-    )
-    
-    return fig
-
-# Helper function to read different file formats
-def read_uploaded_file(file):
-    """Read uploaded file based on its extension"""
-    if file.name.endswith('.csv'):
-        return pd.read_csv(file)
-    elif file.name.endswith(('.xls', '.xlsx')):
-        return pd.read_excel(file)
-    else:
-        raise ValueError("Unsupported file format. Please upload CSV, XLS, or XLSX files.")
-
-def _auto_detect_columns(df):
-    """
-    Auto-detect timestamp and power columns based on common patterns.
-    Returns tuple of (timestamp_col, power_col)
-    """
-    timestamp_col = None
-    power_col = None
-    
-    # Auto-detect timestamp column
-    for col in df.columns:
-        col_lower = col.lower()
-        
-        # Check for common timestamp column names
-        timestamp_keywords = ['date', 'time', 'timestamp', 'datetime', 'dt', 'period']
-        if any(keyword in col_lower for keyword in timestamp_keywords):
-            timestamp_col = col
-            break
-        
-        # If no keyword match, check if column contains datetime-like values
-        if timestamp_col is None:
-            try:
-                # Try to parse first few non-null values as datetime
-                sample_values = df[col].dropna().head(5)
-                if len(sample_values) > 0:
-                    pd.to_datetime(sample_values.iloc[0])
-                    timestamp_col = col
-                    break
-            except:
-                continue
-    
-    # Auto-detect power column
-    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-    
-    for col in numeric_cols:
-        col_lower = col.lower()
-        
-        # Check for common power/demand column names
-        power_keywords = ['power', 'kw', 'kilowatt', 'demand', 'load', 'consumption', 'kwh']
-        if any(keyword in col_lower for keyword in power_keywords):
-            power_col = col
-            break
-            
-    # If no keyword match, use first numeric column as fallback
-    if power_col is None and numeric_cols:
-        power_col = numeric_cols[0]
-    
-    return timestamp_col, power_col
-
-def _configure_data_inputs(df):
-    """Configure data inputs including column selection."""
-    st.subheader("Data Configuration")
-    
-    # Auto-detect columns
-    auto_timestamp_col, auto_power_col = _auto_detect_columns(df)
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("**Column Selection**")
-        
-        # Auto-selected timestamp column with option to override
-        timestamp_options = list(df.columns)
-        
-        if auto_timestamp_col:
-            try:
-                timestamp_index = timestamp_options.index(auto_timestamp_col)
-            except ValueError:
-                timestamp_index = 0
-        else:
-            timestamp_index = 0
-        
-        timestamp_col = st.selectbox(
-            "Timestamp column (auto-detected):", 
-            timestamp_options, 
-            index=timestamp_index,
-            key="timestamp_col",
-            help="Auto-detected based on datetime patterns. Change if incorrect."
-        )
-        
-        # Auto-selected power column with option to override
-        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-        
-        if auto_power_col and auto_power_col in numeric_cols:
-            try:
-                power_index = numeric_cols.index(auto_power_col)
-            except ValueError:
-                power_index = 0
-        else:
-            power_index = 0
-        
-        power_col = st.selectbox(
-            "Power (kW) column (auto-detected):", 
-            numeric_cols, 
-            index=power_index,
-            key="power_col",
-            help="Auto-detected based on column names containing 'power', 'kw', 'demand', etc."
-        )
-    
-    with col2:
-        st.markdown("**Data Preview**")
-        if timestamp_col and power_col:
-            preview_df = df[[timestamp_col, power_col]].head(10)
-            st.dataframe(preview_df, use_container_width=True)
-    
-    return timestamp_col, power_col
-
-def _calculate_roc(df_processed, power_col):
-    """Calculate Rate of Change (ROC) in kW per minute."""
-    df_roc = df_processed.copy()
-    
-    # Calculate time differences in minutes
-    df_roc['time_diff_min'] = df_roc.index.to_series().diff().dt.total_seconds() / 60
-    
-    # Calculate power differences
-    df_roc['power_diff_kw'] = df_roc[power_col].diff()
-    
-    # Calculate ROC (kW per minute)
-    df_roc['roc_kw_per_min'] = df_roc['power_diff_kw'] / df_roc['time_diff_min']
-    
-    # Create clean output dataframe
-    roc_df = pd.DataFrame({
-        'Timestamp': df_roc.index,
-        'Power (kW)': df_roc[power_col],
-        'ROC (kW/min)': df_roc['roc_kw_per_min']
-    })
-    
-    return roc_df
-
-def _detect_data_interval(df_processed):
-    """Detect the data interval from timestamps."""
-    if len(df_processed) > 1:
-        # Get time differences
-        time_diffs = df_processed.index.to_series().diff().dropna()
-        
-        # Find the most common interval
-        mode_interval = time_diffs.mode()
-        if len(mode_interval) > 0:
-            interval_minutes = mode_interval.iloc[0].total_seconds() / 60
-            return interval_minutes
-    
-    return None
-
-def _process_dataframe(df, timestamp_col):
-    """Process the dataframe with timestamp parsing, sorting validation, and indexing."""
-    df_processed = df.copy()
-    
-    # Parse timestamp column
-    df_processed[timestamp_col] = pd.to_datetime(df_processed[timestamp_col], errors='coerce')
-    
-    # Remove rows with invalid timestamps
-    initial_rows = len(df_processed)
-    df_processed = df_processed.dropna(subset=[timestamp_col])
-    final_rows = len(df_processed)
-    
-    if final_rows < initial_rows:
-        st.warning(f"Removed {initial_rows - final_rows} rows with invalid timestamps")
-    
-    # Sort by timestamp
-    df_processed = df_processed.sort_values(timestamp_col)
-    
-    # Set timestamp as index
-    df_processed.set_index(timestamp_col, inplace=True)
-    
-    return df_processed
-
-# Main app
-st.title("🔋 Load Forecasting MVP")
-st.markdown("""
-Upload your load profile data to begin analysis.
-Supports CSV, XLS, and XLSX file formats.
-""")
-
-# File upload
-uploaded_file = st.file_uploader(
-    "Upload your data file", 
-    type=["csv", "xls", "xlsx"], 
-    key="file_uploader"
+# Configure page
+st.set_page_config(
+    page_title="Energy Analytics Platform",
+    page_icon="🔋",
+    layout="wide",
+    initial_sidebar_state="auto"
 )
 
-if uploaded_file:
+def run_load_forecasting():
+    """Run the load forecasting module by executing the file content."""
     try:
-        # Read the uploaded file
-        with st.spinner("Reading uploaded file..."):
-            df = read_uploaded_file(uploaded_file)
+        # Read and execute the load forecasting file
+        with open('load_forecasting.py', 'r') as f:
+            load_forecasting_code = f.read()
         
-        st.success(f"✅ File uploaded successfully! Shape: {df.shape[0]} rows × {df.shape[1]} columns")
+        # Create a new namespace for execution to avoid conflicts
+        namespace = {
+            '__name__': '__main__',
+            'st': st,
+            'warnings': warnings
+        }
         
-        # Configure data inputs
-        timestamp_col, power_col = _configure_data_inputs(df)
+        # Execute the load forecasting code
+        exec(load_forecasting_code, namespace)
         
-        if timestamp_col and power_col:
-            # Process the dataframe
-            with st.spinner("Processing data..."):
-                df_processed = _process_dataframe(df, timestamp_col)
-            
-            st.success(f"✅ Data processed successfully! Final shape: {df_processed.shape[0]} rows")
-            
-            # Display basic statistics
-            st.subheader("📊 Data Summary")
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.metric("Total Records", f"{len(df_processed):,}")
-                
-            with col2:
-                date_range = df_processed.index.max() - df_processed.index.min()
-                st.metric("Date Range", f"{date_range.days} days")
-                
-            with col3:
-                avg_power = df_processed[power_col].mean()
-                st.metric("Average Power", f"{avg_power:.2f} kW")
-            
-            # Show processed data preview
-            st.subheader("📋 Processed Data Preview")
-            st.dataframe(df_processed[[power_col]].head(20), use_container_width=True)
-            
-            # Detect data interval
-            interval_minutes = _detect_data_interval(df_processed)
-            if interval_minutes:
-                st.info(f"📊 Detected data interval: {interval_minutes:.1f} minutes")
-            
-            # Rate of Change (ROC) Analysis
-            st.subheader("📈 Rate of Change (ROC)")
-            st.markdown("*Rate of change in power consumption (kW per minute)*")
-            
-            # ROC Threshold Control
-            roc_threshold = st.slider(
-                "ROC Threshold (kW/min)",
-                min_value=0.1,
-                max_value=10.0,
-                value=3.0,
-                step=0.1,
-                help="Threshold for ROC analysis. Values above +T or below -T will be highlighted."
-            )
-            
-            # Calculate ROC
-            roc_df = _calculate_roc(df_processed, power_col)
-            
-            # Display ROC statistics
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                avg_roc = roc_df['ROC (kW/min)'].mean()
-                st.metric("Average ROC", f"{avg_roc:.3f} kW/min")
-                
-            with col2:
-                max_roc = roc_df['ROC (kW/min)'].max()
-                st.metric("Max ROC", f"{max_roc:.3f} kW/min")
-                
-            with col3:
-                min_roc = roc_df['ROC (kW/min)'].min()
-                st.metric("Min ROC", f"{min_roc:.3f} kW/min")
-            
-            # Display ROC table
-            st.markdown("**ROC Data Table** (showing first 20 rows)")
-            
-            # Format the ROC values for display
-            roc_display = roc_df.head(20).copy()
-            roc_display['ROC (kW/min)'] = roc_display['ROC (kW/min)'].apply(
-                lambda x: "" if pd.isna(x) else f"{x:.3f}"
-            )
-            roc_display['Power (kW)'] = roc_display['Power (kW)'].apply(
-                lambda x: f"{x:.2f}"
-            )
-            
-            st.dataframe(roc_display, use_container_width=True)
-            
-            # ROC insights
-            with st.expander("💡 ROC Analysis Insights"):
-                st.markdown(f"""
-                **Understanding Rate of Change (ROC):**
-                - **Positive ROC**: Power consumption is increasing
-                - **Negative ROC**: Power consumption is decreasing  
-                - **Zero ROC**: Power consumption is stable
-                
-                **Your Data:**
-                - **Data Interval**: {interval_minutes:.1f} minutes (auto-detected)
-                - **ROC Range**: {min_roc:.3f} to {max_roc:.3f} kW/min
-                - **Average ROC**: {avg_roc:.3f} kW/min
-                
-                **Note:** First row ROC is blank as it requires a previous data point for calculation.
-                """)
-            
-            # Charts Section
-            st.subheader("📈 Demand & ROC Charts")
-            st.markdown(f"*Using ROC threshold: ±{roc_threshold} kW/min*")
-            
-            # Chart 1: Power Demand Over Time
-            st.markdown("#### 1️⃣ Power Demand Over Time")
-            demand_chart = _create_demand_chart(df_processed, power_col)
-            st.plotly_chart(demand_chart, use_container_width=True)
-            
-            # Chart 2: ROC Over Time with Thresholds
-            st.markdown("#### 2️⃣ Rate of Change (ROC) with Thresholds")
-            roc_chart = _create_roc_chart(roc_df, roc_threshold)
-            st.plotly_chart(roc_chart, use_container_width=True)
-            
-            # ROC threshold analysis
-            st.markdown("#### 🎯 ROC Threshold Analysis")
-            
-            # Count values above/below thresholds
-            above_positive = len(roc_df[roc_df['ROC (kW/min)'] > roc_threshold])
-            below_negative = len(roc_df[roc_df['ROC (kW/min)'] < -roc_threshold])
-            within_threshold = len(roc_df) - above_positive - below_negative - 1  # -1 for NaN first row
-            
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Above +T", f"{above_positive}", delta=f"{above_positive/len(roc_df)*100:.1f}%")
-            col2.metric("Below -T", f"{below_negative}", delta=f"{below_negative/len(roc_df)*100:.1f}%")
-            col3.metric("Within ±T", f"{within_threshold}", delta=f"{within_threshold/len(roc_df)*100:.1f}%")
-            
-
-            # Chart insights
-            with st.expander("💡 Chart Insights"):
-                st.markdown(f"""
-                **Demand Chart Analysis:**
-                - Shows actual power consumption over time
-                - Identify patterns, peaks, and trends
-                - Look for daily/weekly cycles
-                
-                **ROC Chart Analysis:**
-                - Red dashed lines: ±{roc_threshold} kW/min thresholds
-                - **Above +{roc_threshold}**: Rapid power increase ({above_positive} points)
-                - **Below -{roc_threshold}**: Rapid power decrease ({below_negative} points)
-                - **Within ±{roc_threshold}**: Stable/gradual changes ({within_threshold} points)
-                
-                **Use the slider to adjust the threshold and see how it affects the analysis!**
-                """)
-
-            # --- Power Usage Forecast Section ---
-            st.subheader("🔮 Power Usage Forecast Table")
-            st.markdown("Forecast future power using anchor points and ROC.")
-
-            # Controls
-            # Set up columns for controls
-            colA, colB, colC = st.columns(3)
-            
-            # Get anchor method first to determine UI
-            with colB:
-                anchor_method = st.selectbox("Anchor sampling method", ["Random", "Grid (every 15 min)", "Ramp starts", "All available points"])
-                if anchor_method == "All available points":
-                    st.caption("⚠️ This will use all data points for comprehensive analysis (may take longer)")
-            
-            with colA:
-                if anchor_method != "All available points":
-                    n_anchors = st.number_input("Number of anchors", min_value=3, max_value=100, value=10, step=1)
-                else:
-                    st.metric("Total anchor points", "All available", help="Using all data points for comprehensive analysis")
-                    n_anchors = 999999  # Will be updated to actual count below
-            
-            with colC:
-                horizon_options = [1, 2, 5, 10, 20]
-                horizons = st.multiselect("Forecast horizons (min)", horizon_options, default=[1, 5, 10, 20])
-
-            # Optional controls for headroom/MD risk
-            st.markdown("**(Optional)**: Enter MD target and margin for headroom/risk analysis.")
-            colD, colE = st.columns(2)
-            with colD:
-                md_target = st.number_input("MD target (kW)", min_value=0.0, value=200.0, step=1.0)
-            with colE:
-                md_margin = st.number_input("MD margin (kW)", min_value=0.0, value=10.0, step=1.0)
-
-            # Prepare anchor candidates (exclude first row, drop NA ROC)
-            anchor_df = roc_df.dropna(subset=["ROC (kW/min)"]).copy()
-            anchor_df = anchor_df.reset_index(drop=True)
-            
-            # Update n_anchors for "All available points" mode
-            if anchor_method == "All available points":
-                n_anchors = len(anchor_df)
-                st.info(f"Using all {n_anchors} available data points for comprehensive analysis.")
-
-            # Anchor sampling with deterministic approach
-            import numpy as np
-            import random
-            
-            # Create a deterministic seed based on data characteristics to ensure consistency
-            data_seed = hash(str(len(anchor_df)) + str(anchor_df['Timestamp'].min()) + str(anchor_df['Timestamp'].max())) % 2147483647
-            random.seed(data_seed)
-            np.random.seed(data_seed)
-            
-            anchor_indices = []
-            if anchor_method == "Random":
-                if len(anchor_df) <= n_anchors:
-                    anchor_indices = list(range(len(anchor_df)))
-                else:
-                    anchor_indices = sorted(random.sample(range(len(anchor_df)), n_anchors))
-            elif anchor_method == "Grid (every 15 min)":
-                # Find indices spaced by at least 15 min
-                anchor_indices = [0]
-                last_ts = anchor_df.loc[0, "Timestamp"]
-                for i, row in anchor_df.iterrows():
-                    if (row["Timestamp"] - last_ts).total_seconds() >= 15*60:
-                        anchor_indices.append(i)
-                        last_ts = row["Timestamp"]
-                    if len(anchor_indices) >= n_anchors:
-                        break
-            elif anchor_method == "Ramp starts":
-                # Anchor at points where ROC crosses threshold
-                ramp_mask = (anchor_df["ROC (kW/min)"] > roc_threshold) | (anchor_df["ROC (kW/min)"] < -roc_threshold)
-                ramp_indices = list(np.where(ramp_mask)[0])
-                if len(ramp_indices) > n_anchors:
-                    anchor_indices = sorted(random.sample(ramp_indices, n_anchors))
-                else:
-                    anchor_indices = ramp_indices
-            elif anchor_method == "All available points":
-                # Use all available data points for comprehensive analysis
-                anchor_indices = list(range(len(anchor_df)))
-            
-            # Reset random state to avoid affecting other parts
-            random.seed()
-            np.random.seed()
-            
-            # Fallback if not enough anchors
-            if len(anchor_indices) == 0:
-                st.warning("No anchor points found for the selected method. Try another method or lower the threshold.")
-            else:
-                # Build forecast table
-                results = []
-                for idx in anchor_indices:
-                    anchor_row = anchor_df.iloc[idx]
-                    anchor_ts = anchor_row["Timestamp"]
-                    P_now = anchor_row["Power (kW)"]
-                    ROC_now = anchor_row["ROC (kW/min)"]
-                    for h in sorted(horizons):
-                        # Find actual future value
-                        target_ts = anchor_ts + pd.Timedelta(minutes=h)
-                        # Find closest row in df_processed (timestamp is the index)
-                        try:
-                            # Try exact match first
-                            P_actual = df_processed.loc[target_ts, power_col]
-                        except KeyError:
-                            # Try nearest time (if exact not found)
-                            nearest_idx = (df_processed.index - target_ts).abs().idxmin()
-                            P_actual = df_processed.loc[nearest_idx, power_col]
-                        # Forecast
-                        P_hat = P_now + ROC_now * h
-                        error = P_hat - P_actual
-                        abs_error = abs(error)
-                        headroom = md_target - P_hat
-                        md_risk = headroom <= md_margin
-                        results.append({
-                            "anchor_ts": anchor_ts,
-                            "dt_min": 1,
-                            "horizon_min": h,
-                            "P_now_kW": P_now,
-                            "ROC_now_kW_per_min": ROC_now,
-                            "P_hat_kW": P_hat,
-                            "P_actual_kW": P_actual,
-                            "error_kW": error,
-                            "abs_error_kW": abs_error,
-                            "headroom_kW": headroom,
-                            "md_risk": md_risk
-                        })
-                forecast_df = pd.DataFrame(results)
-                # Formatting
-                forecast_df["anchor_ts"] = forecast_df["anchor_ts"].dt.strftime("%Y-%m-%d %H:%M")
-                
-                # Display note about sampling vs comprehensive analysis
-                if anchor_method != "All available points":
-                    st.info(f"📋 **Forecast Table**: Showing {len(forecast_df)} sampled anchor points for review. **Error Metrics**: Calculated from ALL {len(anchor_df)} available data points for comprehensive analysis.")
-                else:
-                    st.info(f"📋 **Comprehensive Analysis**: Using all {len(forecast_df)} available data points for both table display and error metrics.")
-                
-                st.dataframe(forecast_df, use_container_width=True)
-                
-                # --- Comprehensive Error Metrics by Horizon ---
-                st.markdown("#### 📈 Comprehensive Error Metrics by Horizon")
-                st.markdown("*Performance metrics calculated from ALL available data points*")
-                
-                # Configuration for MAPE threshold
-                col1, col2 = st.columns(2)
-                with col1:
-                    mape_threshold = st.number_input(
-                        "MAPE Threshold (kW)",
-                        min_value=0.0,
-                        value=200.0,
-                        step=10.0,
-                        help="Exclude rows where actual power < threshold from MAPE calculation"
-                    )
-                
-                # Build comprehensive forecast dataset using ALL data points for error metrics
-                st.markdown("*Building comprehensive dataset for error analysis...*")
-                comprehensive_results = []
-                
-                # Use all available anchor candidates for comprehensive error metrics
-                for idx in range(len(anchor_df)):
-                    anchor_row = anchor_df.iloc[idx]
-                    anchor_ts = anchor_row["Timestamp"]
-                    P_now = anchor_row["Power (kW)"]
-                    ROC_now = anchor_row["ROC (kW/min)"]
-                    
-                    for h in sorted(horizons):
-                        # Find actual future value
-                        target_ts = anchor_ts + pd.Timedelta(minutes=h)
-                        try:
-                            # Try exact match first
-                            P_actual = df_processed.loc[target_ts, power_col]
-                        except KeyError:
-                            # Try nearest time (if exact not found)
-                            try:
-                                nearest_idx = (df_processed.index - target_ts).abs().idxmin()
-                                P_actual = df_processed.loc[nearest_idx, power_col]
-                            except:
-                                continue  # Skip if no valid future point found
-                        
-                        # Forecast
-                        P_hat = P_now + ROC_now * h
-                        error = P_hat - P_actual
-                        abs_error = abs(error)
-                        
-                        comprehensive_results.append({
-                            "anchor_ts": anchor_ts,
-                            "horizon_min": h,
-                            "P_hat_kW": P_hat,
-                            "P_actual_kW": P_actual,
-                            "error_kW": error,
-                            "abs_error_kW": abs_error
-                        })
-                
-                comprehensive_forecast_df = pd.DataFrame(comprehensive_results)
-                
-                with col2:
-                    st.metric("Total Data Points", len(comprehensive_forecast_df), help="All available data points used in comprehensive analysis")
-                
-                # Calculate enhanced metrics per horizon using comprehensive dataset
-                horizon_metrics = []
-                available_horizons = sorted(comprehensive_forecast_df["horizon_min"].unique())
-                
-                # Add APE column for analysis
-                forecast_df_analysis = comprehensive_forecast_df.copy()
-                forecast_df_analysis["ape"] = (forecast_df_analysis["abs_error_kW"] / forecast_df_analysis["P_actual_kW"]) * 100
-                
-                for horizon in available_horizons:
-                    horizon_data = forecast_df_analysis[forecast_df_analysis["horizon_min"] == horizon].copy()
-                    
-                    if len(horizon_data) > 0:
-                        # Filter for MAPE calculation (exclude low power values)
-                        mape_eligible = horizon_data[horizon_data["P_actual_kW"] >= mape_threshold]
-                        
-                        # MAE and RMSE in kW
-                        mae_kw = horizon_data["abs_error_kW"].mean()
-                        rmse_kw = np.sqrt((horizon_data["error_kW"] ** 2).mean())
-                        
-                        # MAPE (only for eligible data points)
-                        mape = mape_eligible["ape"].mean() if len(mape_eligible) > 0 else np.nan
-                        mape_count = len(mape_eligible)
-                        
-                        # sMAPE (Symmetric MAPE)
-                        smape_values = []
-                        for _, row in horizon_data.iterrows():
-                            actual = row["P_actual_kW"]
-                            forecast = row["P_hat_kW"]
-                            if actual != 0 or forecast != 0:
-                                smape_val = (abs(forecast - actual) / ((abs(actual) + abs(forecast)) / 2)) * 100
-                                smape_values.append(smape_val)
-                        smape = np.mean(smape_values) if smape_values else np.nan
-                        
-                        # WAPE (Weighted Absolute Percentage Error)
-                        total_abs_error = horizon_data["abs_error_kW"].sum()
-                        total_actual = horizon_data["P_actual_kW"].sum()
-                        wape = (total_abs_error / total_actual) * 100 if total_actual > 0 else np.nan
-                        
-                        # Percentiles of APE
-                        p50_ape = horizon_data["ape"].median()
-                        p90_ape = horizon_data["ape"].quantile(0.9)
-                        
-                        horizon_metrics.append({
-                            'Horizon (min)': horizon,
-                            'Count': len(horizon_data),
-                            'MAE (kW)': f"{mae_kw:.2f}",
-                            'RMSE (kW)': f"{rmse_kw:.2f}",
-                            'MAPE (%)': f"{mape:.2f}" if not np.isnan(mape) else "N/A",
-                            'MAPE Count': mape_count,
-                            'sMAPE (%)': f"{smape:.2f}" if not np.isnan(smape) else "N/A",
-                            'WAPE (%)': f"{wape:.2f}" if not np.isnan(wape) else "N/A",
-                            'P50 APE (%)': f"{p50_ape:.2f}",
-                            'P90 APE (%)': f"{p90_ape:.2f}"
-                        })
-                
-                if horizon_metrics:
-                    metrics_df = pd.DataFrame(horizon_metrics)
-                    
-                    # Display metrics table
-                    st.markdown("**📊 Error Metrics Summary:**")
-                    st.dataframe(metrics_df, use_container_width=True)
-                    
-                    # Visualizations
-                    st.markdown("**📈 Error Metrics Visualization:**")
-                    
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        # MAE and RMSE comparison
-                        fig_mae_rmse = go.Figure()
-                        fig_mae_rmse.add_trace(go.Bar(
-                            x=[f"{h} min" for h in available_horizons],
-                            y=[float(m['MAE (kW)']) for m in horizon_metrics],
-                            name='MAE (kW)',
-                            marker_color='lightblue'
-                        ))
-                        fig_mae_rmse.add_trace(go.Bar(
-                            x=[f"{h} min" for h in available_horizons],
-                            y=[float(m['RMSE (kW)']) for m in horizon_metrics],
-                            name='RMSE (kW)',
-                            marker_color='darkblue'
-                        ))
-                        fig_mae_rmse.update_layout(
-                            title="MAE vs RMSE by Horizon",
-                            xaxis_title="Forecast Horizon",
-                            yaxis_title="Error (kW)",
-                            barmode='group'
-                        )
-                        st.plotly_chart(fig_mae_rmse, use_container_width=True)
-                    
-                    with col2:
-                        # Percentage metrics comparison
-                        fig_percentage = go.Figure()
-                        
-                        # Only include non-NaN values
-                        mape_values = [float(m['MAPE (%)']) for m in horizon_metrics if m['MAPE (%)'] != 'N/A']
-                        smape_values = [float(m['sMAPE (%)']) for m in horizon_metrics if m['sMAPE (%)'] != 'N/A']
-                        wape_values = [float(m['WAPE (%)']) for m in horizon_metrics if m['WAPE (%)'] != 'N/A']
-                        
-                        horizons_labels = [f"{h} min" for h in available_horizons]
-                        
-                        if mape_values:
-                            fig_percentage.add_trace(go.Scatter(
-                                x=horizons_labels[:len(mape_values)],
-                                y=mape_values,
-                                name='MAPE (%)',
-                                mode='lines+markers'
-                            ))
-                        if smape_values:
-                            fig_percentage.add_trace(go.Scatter(
-                                x=horizons_labels[:len(smape_values)],
-                                y=smape_values,
-                                name='sMAPE (%)',
-                                mode='lines+markers'
-                            ))
-                        if wape_values:
-                            fig_percentage.add_trace(go.Scatter(
-                                x=horizons_labels[:len(wape_values)],
-                                y=wape_values,
-                                name='WAPE (%)',
-                                mode='lines+markers'
-                            ))
-                        
-                        fig_percentage.update_layout(
-                            title="Percentage Error Metrics by Horizon",
-                            xaxis_title="Forecast Horizon",
-                            yaxis_title="Error (%)"
-                        )
-                        st.plotly_chart(fig_percentage, use_container_width=True)
-                    
-                    # APE Percentiles Chart
-                    st.markdown("**📊 APE Percentiles by Horizon:**")
-                    fig_ape = go.Figure()
-                    fig_ape.add_trace(go.Scatter(
-                        x=[f"{h} min" for h in available_horizons],
-                        y=[float(m['P50 APE (%)']) for m in horizon_metrics],
-                        name='P50 APE (%)',
-                        mode='lines+markers',
-                        marker_color='green'
-                    ))
-                    fig_ape.add_trace(go.Scatter(
-                        x=[f"{h} min" for h in available_horizons],
-                        y=[float(m['P90 APE (%)']) for m in horizon_metrics],
-                        name='P90 APE (%)',
-                        mode='lines+markers',
-                        marker_color='red'
-                    ))
-                    fig_ape.update_layout(
-                        title="APE Percentiles by Forecast Horizon",
-                        xaxis_title="Forecast Horizon",
-                        yaxis_title="APE (%)",
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02)
-                    )
-                    st.plotly_chart(fig_ape, use_container_width=True)
-                    
-                    # Metric definitions
-                    with st.expander("📖 Metric Definitions"):
-                        st.markdown(f"""
-                        - **MAE (kW)**: Mean Absolute Error in kilowatts
-                        - **RMSE (kW)**: Root Mean Square Error in kilowatts  
-                        - **MAPE (%)**: Mean Absolute Percentage Error (excludes actual < {mape_threshold:.0f} kW)
-                        - **sMAPE (%)**: Symmetric Mean Absolute Percentage Error
-                        - **WAPE (%)**: Weighted Absolute Percentage Error
-                        - **P50/P90 APE (%)**: 50th/90th percentile of Absolute Percentage Error
-                        - **MAPE Count**: Number of data points used in MAPE calculation
-                        """)
-                    
-                    # Download metrics
-                    metrics_csv = metrics_df.to_csv(index=False)
-                    st.download_button(
-                        label="📥 Download Error Metrics (CSV)",
-                        data=metrics_csv,
-                        file_name="comprehensive_forecast_metrics.csv",
-                        mime="text/csv"
-                    )
-                    
-                    # --- Segmented Error Analysis ---
-                    st.markdown("#### 🔍 Segmented Error Analysis")
-                    st.markdown("*Analyze forecast performance across different operational conditions*")
-                    
-                    # Segmentation controls
-                    segment_col1, segment_col2 = st.columns(2)
-                    
-                    with segment_col1:
-                        analysis_type = st.selectbox(
-                            "Analysis Type",
-                            ["Time-of-Day Buckets", "Ramp vs Calm Regimes", "Actual Load Bands"],
-                            help="Choose how to segment the data for detailed analysis"
-                        )
-                    
-                    with segment_col2:
-                        selected_horizon = st.selectbox(
-                            "Focus Horizon (min)",
-                            available_horizons,
-                            index=0,
-                            help="Select one horizon for detailed segmented analysis"
-                        )
-                    
-                    # Filter data for selected horizon
-                    segment_data = forecast_df_analysis[forecast_df_analysis["horizon_min"] == selected_horizon].copy()
-                    
-                    if len(segment_data) > 0:
-                        # Add timestamp column for time-based analysis
-                        segment_data["hour"] = pd.to_datetime(segment_data["anchor_ts"]).dt.hour
-                        
-                        # Helper function to calculate segment metrics
-                        def calculate_segment_metrics(segment_df, segment_name, mape_threshold):
-                            if len(segment_df) == 0:
-                                return None
-                            
-                            # Filter for MAPE calculation
-                            mape_eligible = segment_df[segment_df["P_actual_kW"] >= mape_threshold]
-                            
-                            # Calculate metrics
-                            mae_kw = segment_df["abs_error_kW"].mean()
-                            rmse_kw = np.sqrt((segment_df["error_kW"] ** 2).mean())
-                            mape = mape_eligible["ape"].mean() if len(mape_eligible) > 0 else np.nan
-                            
-                            # sMAPE
-                            smape_values = []
-                            for _, row in segment_df.iterrows():
-                                actual = row["P_actual_kW"]
-                                forecast = row["P_hat_kW"]
-                                if actual != 0 or forecast != 0:
-                                    smape_val = (abs(forecast - actual) / ((abs(actual) + abs(forecast)) / 2)) * 100
-                                    smape_values.append(smape_val)
-                            smape = np.mean(smape_values) if smape_values else np.nan
-                            
-                            # WAPE
-                            total_abs_error = segment_df["abs_error_kW"].sum()
-                            total_actual = segment_df["P_actual_kW"].sum()
-                            wape = (total_abs_error / total_actual) * 100 if total_actual > 0 else np.nan
-                            
-                            return {
-                                'Segment': segment_name,
-                                'Count': len(segment_df),
-                                'MAE (kW)': f"{mae_kw:.2f}",
-                                'RMSE (kW)': f"{rmse_kw:.2f}",
-                                'MAPE (%)': f"{mape:.1f}" if not np.isnan(mape) else "N/A",
-                                'sMAPE (%)': f"{smape:.1f}" if not np.isnan(smape) else "N/A",
-                                'WAPE (%)': f"{wape:.1f}" if not np.isnan(wape) else "N/A"
-                            }
-                        
-                        # Perform segmented analysis based on selected type
-                        segment_results = []
-                        
-                        if analysis_type == "Time-of-Day Buckets":
-                            # Define time buckets
-                            time_buckets = [
-                                (0, 6, "Night (00-06)"),
-                                (6, 12, "Morning (06-12)"),
-                                (12, 18, "Afternoon (12-18)"),
-                                (18, 24, "Evening (18-24)")
-                            ]
-                            
-                            for start_hour, end_hour, bucket_name in time_buckets:
-                                if start_hour == 0:  # Handle midnight case
-                                    bucket_data = segment_data[
-                                        (segment_data["hour"] >= start_hour) & (segment_data["hour"] < end_hour)
-                                    ]
-                                else:
-                                    bucket_data = segment_data[
-                                        (segment_data["hour"] >= start_hour) & (segment_data["hour"] < end_hour)
-                                    ]
-                                
-                                result = calculate_segment_metrics(bucket_data, bucket_name, mape_threshold)
-                                if result:
-                                    segment_results.append(result)
-                        
-                        elif analysis_type == "Ramp vs Calm Regimes":
-                            # Add ROC classification to segment data
-                            segment_data_with_roc = segment_data.merge(
-                                roc_df[["Timestamp", "ROC (kW/min)"]], 
-                                left_on="anchor_ts", 
-                                right_on="Timestamp", 
-                                how="left"
-                            )
-                            
-                            # Classify as ramp or calm
-                            ramp_data = segment_data_with_roc[
-                                (segment_data_with_roc["ROC (kW/min)"].abs() > roc_threshold)
-                            ]
-                            calm_data = segment_data_with_roc[
-                                (segment_data_with_roc["ROC (kW/min)"].abs() <= roc_threshold)
-                            ]
-                            
-                            # Calculate metrics for each regime
-                            ramp_result = calculate_segment_metrics(ramp_data, f"Ramp (|ROC| > {roc_threshold:.1f})", mape_threshold)
-                            calm_result = calculate_segment_metrics(calm_data, f"Calm (|ROC| ≤ {roc_threshold:.1f})", mape_threshold)
-                            
-                            if ramp_result:
-                                segment_results.append(ramp_result)
-                            if calm_result:
-                                segment_results.append(calm_result)
-                        
-                        elif analysis_type == "Actual Load Bands":
-                            # Calculate load percentiles
-                            load_min = segment_data["P_actual_kW"].min()
-                            load_max = segment_data["P_actual_kW"].max()
-                            load_range = load_max - load_min
-                            
-                            # Define load bands based on percentiles
-                            load_bands = [
-                                (load_min, load_min + 0.33 * load_range, "Low Load (0-33%)"),
-                                (load_min + 0.33 * load_range, load_min + 0.67 * load_range, "Medium Load (33-67%)"),
-                                (load_min + 0.67 * load_range, load_max, "High Load (67-100%)")
-                            ]
-                            
-                            for min_load, max_load, band_name in load_bands:
-                                if band_name == "High Load (67-100%)":  # Include max value
-                                    band_data = segment_data[
-                                        (segment_data["P_actual_kW"] >= min_load) & (segment_data["P_actual_kW"] <= max_load)
-                                    ]
-                                else:
-                                    band_data = segment_data[
-                                        (segment_data["P_actual_kW"] >= min_load) & (segment_data["P_actual_kW"] < max_load)
-                                    ]
-                                
-                                result = calculate_segment_metrics(band_data, f"{band_name}\n({min_load:.0f}-{max_load:.0f} kW)", mape_threshold)
-                                if result:
-                                    segment_results.append(result)
-                        
-                        # Display results
-                        if segment_results:
-                            st.markdown(f"**📊 {analysis_type} Analysis - {selected_horizon} min horizon:**")
-                            segment_df = pd.DataFrame(segment_results)
-                            st.dataframe(segment_df, use_container_width=True)
-                            
-                            # Summary insights
-                            with st.expander(f"💡 {analysis_type} Insights"):
-                                if analysis_type == "Time-of-Day Buckets":
-                                    st.markdown(f"""
-                                    **Time-of-Day Performance Analysis:**
-                                    - Compare forecast accuracy across different times of day
-                                    - Identify if certain time periods have better/worse performance
-                                    - Look for patterns related to operational schedules or demand cycles
-                                    
-                                    **Your Data ({selected_horizon} min horizon):**
-                                    - Total segments analyzed: {len(segment_results)}
-                                    - Use this to optimize forecasting strategies for different time periods
-                                    """)
-                                elif analysis_type == "Ramp vs Calm Regimes":
-                                    ramp_count = sum(1 for r in segment_results if "Ramp" in r['Segment'])
-                                    calm_count = sum(1 for r in segment_results if "Calm" in r['Segment'])
-                                    st.markdown(f"""
-                                    **Ramp vs Calm Performance Analysis:**
-                                    - **Ramp periods**: High rate of change (|ROC| > {roc_threshold:.1f} kW/min)
-                                    - **Calm periods**: Stable conditions (|ROC| ≤ {roc_threshold:.1f} kW/min)
-                                    - Compare forecast accuracy during dynamic vs stable conditions
-                                    
-                                    **Your Data ({selected_horizon} min horizon):**
-                                    - Ramp regimes analyzed: {ramp_count}
-                                    - Calm regimes analyzed: {calm_count}
-                                    - Use this to understand forecast performance during load transitions
-                                    """)
-                                elif analysis_type == "Actual Load Bands":
-                                    st.markdown(f"""
-                                    **Load Band Performance Analysis:**
-                                    - Compare forecast accuracy across different load levels
-                                    - Identify if forecasting is better at high, medium, or low loads
-                                    - Understand performance across the operational range
-                                    
-                                    **Your Data ({selected_horizon} min horizon):**
-                                    - Load range: {load_min:.0f} - {load_max:.0f} kW
-                                    - Segments analyzed: {len(segment_results)}
-                                    - Use this to understand forecast reliability across load conditions
-                                    """)
-                        else:
-                            st.warning(f"No data available for {analysis_type} analysis at {selected_horizon} min horizon.")
-                    else:
-                        st.warning(f"No forecast data available for {selected_horizon} min horizon.")
-                
-                else:
-                    st.warning("No forecast data available for metrics calculation.")
-                
-                # --- Download All Results ---
-                if len(forecast_df_analysis) > 0:
-                    st.markdown("#### 📥 Export Comprehensive Results")
-                    st.markdown("*Download complete error metrics dataset for all horizons and segments*")
-                    
-                    # Function to calculate enhanced segment metrics with bias
-                    def calculate_enhanced_segment_metrics(segment_df, segment_type, segment_label, horizon, mape_threshold):
-                        if len(segment_df) == 0:
-                            return None
-                        
-                        # Filter for MAPE calculation
-                        mape_eligible = segment_df[segment_df["P_actual_kW"] >= mape_threshold]
-                        
-                        # Calculate all metrics
-                        mae_kw = segment_df["abs_error_kW"].mean()
-                        rmse_kw = np.sqrt((segment_df["error_kW"] ** 2).mean())
-                        bias_kw = segment_df["error_kW"].mean()  # Mean error (bias)
-                        mape = mape_eligible["ape"].mean() if len(mape_eligible) > 0 else np.nan
-                        
-                        # sMAPE
-                        smape_values = []
-                        for _, row in segment_df.iterrows():
-                            actual = row["P_actual_kW"]
-                            forecast = row["P_hat_kW"]
-                            if actual != 0 or forecast != 0:
-                                smape_val = (abs(forecast - actual) / ((abs(actual) + abs(forecast)) / 2)) * 100
-                                smape_values.append(smape_val)
-                        smape = np.mean(smape_values) if smape_values else np.nan
-                        
-                        # WAPE
-                        total_abs_error = segment_df["abs_error_kW"].sum()
-                        total_actual = segment_df["P_actual_kW"].sum()
-                        wape = (total_abs_error / total_actual) * 100 if total_actual > 0 else np.nan
-                        
-                        # Percentiles
-                        p50_ape = segment_df["ape"].median()
-                        p90_ape = segment_df["ape"].quantile(0.9)
-                        
-                        return {
-                            'horizon_min': horizon,
-                            'segment_type': segment_type,
-                            'segment_label': segment_label,
-                            'count': len(segment_df),
-                            'mae_kw': mae_kw,
-                            'rmse_kw': rmse_kw,
-                            'mape_pct': mape,
-                            'smape_pct': smape,
-                            'wape_pct': wape,
-                            'bias_kw': bias_kw,
-                            'p50_pct': p50_ape,
-                            'p90_pct': p90_ape
-                        }
-                    
-                    # Build comprehensive results for all horizons and segments
-                    with st.spinner("Building comprehensive results dataset..."):
-                        all_results = []
-                        
-                        # Process each horizon
-                        for horizon in available_horizons:
-                            horizon_data = forecast_df_analysis[forecast_df_analysis["horizon_min"] == horizon].copy()
-                            
-                            if len(horizon_data) > 0:
-                                # Add timestamp column for time-based analysis
-                                horizon_data["hour"] = pd.to_datetime(horizon_data["anchor_ts"]).dt.hour
-                                
-                                # 1. Overall metrics (no segmentation)
-                                overall_result = calculate_enhanced_segment_metrics(
-                                    horizon_data, "Overall", "All Data", horizon, mape_threshold
-                                )
-                                if overall_result:
-                                    all_results.append(overall_result)
-                                
-                                # 2. Time-of-Day Buckets
-                                time_buckets = [
-                                    (0, 6, "Night (00-06)"),
-                                    (6, 12, "Morning (06-12)"),
-                                    (12, 18, "Afternoon (12-18)"),
-                                    (18, 24, "Evening (18-24)")
-                                ]
-                                
-                                for start_hour, end_hour, bucket_name in time_buckets:
-                                    bucket_data = horizon_data[
-                                        (horizon_data["hour"] >= start_hour) & (horizon_data["hour"] < end_hour)
-                                    ]
-                                    result = calculate_enhanced_segment_metrics(
-                                        bucket_data, "Time-of-Day", bucket_name, horizon, mape_threshold
-                                    )
-                                    if result:
-                                        all_results.append(result)
-                                
-                                # 3. Ramp vs Calm Regimes
-                                horizon_data_with_roc = horizon_data.merge(
-                                    roc_df[["Timestamp", "ROC (kW/min)"]], 
-                                    left_on="anchor_ts", 
-                                    right_on="Timestamp", 
-                                    how="left"
-                                )
-                                
-                                # Ramp regime
-                                ramp_data = horizon_data_with_roc[
-                                    (horizon_data_with_roc["ROC (kW/min)"].abs() > roc_threshold)
-                                ]
-                                ramp_result = calculate_enhanced_segment_metrics(
-                                    ramp_data, "ROC Regime", f"Ramp (|ROC| > {roc_threshold:.1f})", horizon, mape_threshold
-                                )
-                                if ramp_result:
-                                    all_results.append(ramp_result)
-                                
-                                # Calm regime
-                                calm_data = horizon_data_with_roc[
-                                    (horizon_data_with_roc["ROC (kW/min)"].abs() <= roc_threshold)
-                                ]
-                                calm_result = calculate_enhanced_segment_metrics(
-                                    calm_data, "ROC Regime", f"Calm (|ROC| ≤ {roc_threshold:.1f})", horizon, mape_threshold
-                                )
-                                if calm_result:
-                                    all_results.append(calm_result)
-                                
-                                # 4. Load Bands
-                                load_min = horizon_data["P_actual_kW"].min()
-                                load_max = horizon_data["P_actual_kW"].max()
-                                load_range = load_max - load_min
-                                
-                                load_bands = [
-                                    (load_min, load_min + 0.33 * load_range, "Low Load (0-33%)"),
-                                    (load_min + 0.33 * load_range, load_min + 0.67 * load_range, "Medium Load (33-67%)"),
-                                    (load_min + 0.67 * load_range, load_max, "High Load (67-100%)")
-                                ]
-                                
-                                for min_load, max_load, band_name in load_bands:
-                                    if band_name == "High Load (67-100%)":
-                                        band_data = horizon_data[
-                                            (horizon_data["P_actual_kW"] >= min_load) & (horizon_data["P_actual_kW"] <= max_load)
-                                        ]
-                                    else:
-                                        band_data = horizon_data[
-                                            (horizon_data["P_actual_kW"] >= min_load) & (horizon_data["P_actual_kW"] < max_load)
-                                        ]
-                                    
-                                    result = calculate_enhanced_segment_metrics(
-                                        band_data, "Load Band", f"{band_name} ({min_load:.0f}-{max_load:.0f} kW)", horizon, mape_threshold
-                                    )
-                                    if result:
-                                        all_results.append(result)
-                    
-                    # Create comprehensive results dataframe
-                    if all_results:
-                        comprehensive_df = pd.DataFrame(all_results)
-                        
-                        # Format for export
-                        export_df = comprehensive_df.copy()
-                        export_df = export_df.round({
-                            'mae_kw': 2,
-                            'rmse_kw': 2,
-                            'mape_pct': 2,
-                            'smape_pct': 2,
-                            'wape_pct': 2,
-                            'bias_kw': 2,
-                            'p50_pct': 2,
-                            'p90_pct': 2
-                        })
-                        
-                        # Display summary
-                        col1, col2, col3 = st.columns(3)
-                        col1.metric("Total Records", len(export_df))
-                        col2.metric("Horizons Analyzed", len(available_horizons))
-                        col3.metric("Segment Types", len(export_df['segment_type'].unique()))
-                        
-                        # Preview table
-                        st.markdown("**📋 Preview of Comprehensive Results:**")
-                        st.dataframe(export_df.head(10), use_container_width=True)
-                        
-                        # Download buttons
-                        col1, col2 = st.columns(2)
-                        
-                        with col1:
-                            # CSV download
-                            csv_data = export_df.to_csv(index=False)
-                            st.download_button(
-                                label="📥 Download as CSV",
-                                data=csv_data,
-                                file_name="comprehensive_forecast_analysis.csv",
-                                mime="text/csv",
-                                help="Download complete results in CSV format"
-                            )
-                        
-                        with col2:
-                            # Excel download
-                            from io import BytesIO
-                            excel_buffer = BytesIO()
-                            
-                            # Create Excel with multiple sheets
-                            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                                # Main results sheet
-                                export_df.to_excel(writer, sheet_name='All_Results', index=False)
-                                
-                                # Summary by segment type
-                                summary_by_type = export_df.groupby(['segment_type', 'horizon_min']).agg({
-                                    'count': 'sum',
-                                    'mae_kw': 'mean',
-                                    'rmse_kw': 'mean',
-                                    'mape_pct': 'mean',
-                                    'bias_kw': 'mean'
-                                }).round(2).reset_index()
-                                summary_by_type.to_excel(writer, sheet_name='Summary_by_Type', index=False)
-                                
-                                # Metadata sheet
-                                metadata = pd.DataFrame({
-                                    'Parameter': ['MAPE_Threshold_kW', 'ROC_Threshold_kW_per_min', 'Total_Data_Points', 'Export_Timestamp'],
-                                    'Value': [mape_threshold, roc_threshold, len(forecast_df_analysis), pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')]
-                                })
-                                metadata.to_excel(writer, sheet_name='Metadata', index=False)
-                            
-                            excel_data = excel_buffer.getvalue()
-                            st.download_button(
-                                label="📊 Download as Excel",
-                                data=excel_data,
-                                file_name="comprehensive_forecast_analysis.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                help="Download complete results in Excel format with multiple sheets"
-                            )
-                        
-                        # Data dictionary
-                        with st.expander("📖 Data Dictionary"):
-                            st.markdown("""
-                            **Column Descriptions:**
-                            - **horizon_min**: Forecast horizon in minutes
-                            - **segment_type**: Type of segmentation (Overall, Time-of-Day, ROC Regime, Load Band)
-                            - **segment_label**: Specific segment name/description
-                            - **count**: Number of data points in segment
-                            - **mae_kw**: Mean Absolute Error in kilowatts
-                            - **rmse_kw**: Root Mean Square Error in kilowatts
-                            - **mape_pct**: Mean Absolute Percentage Error (excludes actual < threshold)
-                            - **smape_pct**: Symmetric Mean Absolute Percentage Error
-                            - **wape_pct**: Weighted Absolute Percentage Error
-                            - **bias_kw**: Mean error (positive = over-forecast, negative = under-forecast)
-                            - **p50_pct**: 50th percentile (median) of Absolute Percentage Error
-                            - **p90_pct**: 90th percentile of Absolute Percentage Error
-                            
-                            **Excel Sheets:**
-                            - **All_Results**: Complete tidy dataset with all metrics
-                            - **Summary_by_Type**: Aggregated results by segment type and horizon
-                            - **Metadata**: Analysis parameters and export information
-                            """)
-                    else:
-                        st.warning("No comprehensive results available for download.")
-
-            # Basic power statistics
-            st.subheader("⚡ Power Statistics")
-            power_stats = df_processed[power_col].describe()
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Minimum", f"{power_stats['min']:.2f} kW")
-            col2.metric("Maximum", f"{power_stats['max']:.2f} kW")
-            col3.metric("Mean", f"{power_stats['mean']:.2f} kW")
-            col4.metric("Std Dev", f"{power_stats['std']:.2f} kW")
-            
-        else:
-            st.error("Please select both timestamp and power columns to proceed.")
-            
+    except FileNotFoundError:
+        st.error("❌ load_forecasting.py file not found")
+        return False
     except Exception as e:
-        st.error(f"Error processing file: {str(e)}")
-        st.info("Please ensure your file contains proper timestamp and numeric power data.")
-else:
-    st.info("👆 Please upload a data file to begin analysis.")
+        st.error(f"❌ Error running Load Forecasting: {str(e)}")
+        with st.expander("🔧 Debug Information"):
+            st.code(f"Error details: {str(e)}")
+        return False
     
-    # Instructions
-    with st.expander("📖 File Format Instructions"):
+    return True
+
+# Import MD Shaving V2 with error handling
+md_shaving_v2_available = True
+md_shaving_v2_error = None
+
+try:
+    from md_shaving_solution_v2 import render_md_shaving_v2
+except ImportError as e:
+    md_shaving_v2_available = False
+    md_shaving_v2_error = str(e)
+
+# Main app header
+st.title("🔋 Energy Analytics Platform")
+st.markdown("""
+**Comprehensive energy analysis toolkit** with advanced forecasting and optimization capabilities.
+""")
+
+# Status indicators
+col1, col2, col3 = st.columns(3)
+
+with col1:
+    if os.path.exists('load_forecasting.py'):
+        st.success("📊 Load Forecasting: Ready")
+    else:
+        st.error("📊 Load Forecasting: File Missing")
+
+with col2:
+    if md_shaving_v2_available:
+        st.success("🔋 MD Shaving V2: Ready")
+    else:
+        st.warning("🔋 MD Shaving V2: Dependencies Missing")
+
+with col3:
+    available_modules = []
+    if os.path.exists('load_forecasting.py'):
+        available_modules.append("Load Forecasting")
+    if md_shaving_v2_available:
+        available_modules.append("MD Shaving V2")
+    
+    st.info(f"✅ {len(available_modules)}/2 Modules Available")
+
+# Create tabs
+tab1, tab2 = st.tabs(["📊 Load Forecasting MVP", "🔋 MD Shaving Solution V2"])
+
+# Tab 1: Load Forecasting
+with tab1:
+    st.header("📊 Load Forecasting MVP")
+    
+    if os.path.exists('load_forecasting.py'):
+        run_load_forecasting()
+    else:
+        st.error("❌ Load Forecasting module not available: load_forecasting.py file not found")
         st.markdown("""
-**Supported file formats:**
-- CSV (.csv)
-- Excel (.xls, .xlsx)
-
-**Required columns:**
-- **Timestamp column**: Contains date/time information
-- **Power column**: Contains numeric power values in kW
-
-**Example formats:**
-```
-Timestamp,Power_kW
-2024-01-01 00:00:00,150.5
-2024-01-01 00:30:00,145.2
-```
-
-The app will automatically detect your columns based on common naming patterns.
+        **Load Forecasting Requirements:**
+        - Ensure `load_forecasting.py` exists in the project directory
+        - The file should contain the complete Load Forecasting MVP implementation
         """)
+
+# Tab 2: MD Shaving Solution V2
+with tab2:
+    st.header("🔋 MD Shaving Solution V2")
+    
+    if md_shaving_v2_available:
+        try:
+            render_md_shaving_v2()
+        except Exception as e:
+            st.error(f"❌ Error running MD Shaving V2: {str(e)}")
+            
+            with st.expander("🔧 Debug Information"):
+                st.code(f"Error details: {str(e)}")
+                st.markdown("""
+                **Possible Solutions:**
+                - Check that required modules are available
+                - Install missing dependencies
+                - Verify database files are present
+                """)
+    else:
+        st.error(f"❌ MD Shaving V2 module not available")
+        
+        if md_shaving_v2_error:
+            st.code(f"Import error: {md_shaving_v2_error}")
+        
+        st.markdown("""
+        **MD Shaving V2 Requirements:**
+        - Ensure `md_shaving_solution_v2.py` exists in the project directory
+        - Install missing dependencies (check import statements in the file)
+        - Common missing modules: `tariffs`, `utils`, `battery_algorithms`
+        
+        **Quick Fix Options:**
+        1. Comment out problematic imports in `md_shaving_solution_v2.py`
+        2. Create minimal fallback modules for missing dependencies
+        3. Use only the available functions from MD Shaving V2
+        """)
+
+# Footer
+st.markdown("---")
+st.markdown("""
+<div style='text-align: center; color: #666; font-size: 0.8em; margin-top: 2em;'>
+🔋 Energy Analytics Platform | Load Forecasting & MD Shaving Solutions
+</div>
+""", unsafe_allow_html=True)
