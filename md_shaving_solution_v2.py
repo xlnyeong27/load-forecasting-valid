@@ -1298,26 +1298,62 @@ def render_md_shaving_v2():
                                         st.session_state['v2_tariff_type'] = calc_tariff_type
                                         st.session_state['v2_target_description'] = target_description
                                         
-                                        # Display results
-                                        col1, col2 = st.columns(2)
-                                        
-                                        with col1:
-                                            st.subheader("🎯 Monthly Targets")
-                                            st.info(f"**Method:** {target_method}")
-                                            st.info(f"**Tariff Type:** {calc_tariff_type}")
-                                            st.info(f"**Description:** {target_description}")
+                                        # Generate Monthly Target Calculation Summary Table
+                                        if not reference_peaks.empty and not monthly_targets.empty:
+                                            # Get the general and TOU peaks for comparison
+                                            monthly_general_peaks, monthly_tou_peaks, _ = _calculate_tariff_specific_monthly_peaks(
+                                                df_processed, power_col, selected_tariff, holidays
+                                            )
                                             
-                                            if not monthly_targets.empty:
-                                                st.dataframe(monthly_targets, use_container_width=True)
-                                            else:
-                                                st.warning("No monthly targets generated")
-                                        
-                                        with col2:
-                                            st.subheader("📊 Reference Peaks")
-                                            if not reference_peaks.empty:
-                                                st.dataframe(reference_peaks, use_container_width=True)
-                                            else:
-                                                st.warning("No reference peaks available")
+                                            comparison_data = []
+                                            
+                                            for month_period in reference_peaks.index:
+                                                general_peak = monthly_general_peaks[month_period] if month_period in monthly_general_peaks.index else 0
+                                                tou_peak = monthly_tou_peaks[month_period] if month_period in monthly_tou_peaks.index else 0
+                                                reference_peak = reference_peaks[month_period]
+                                                target = monthly_targets[month_period]
+                                                shaving_amount = reference_peak - target
+                                                
+                                                comparison_data.append({
+                                                    'Month': str(month_period),
+                                                    'General Peak (24/7)': f"{general_peak:.1f} kW",
+                                                    'TOU Peak (2PM-10PM)': f"{tou_peak:.1f} kW",
+                                                    'Reference Peak': f"{reference_peak:.1f} kW",
+                                                    'Target MD': f"{target:.1f} kW",
+                                                    'Shaving Amount': f"{shaving_amount:.1f} kW",
+                                                    'Tariff Type': calc_tariff_type
+                                                })
+                                            
+                                            df_comparison = pd.DataFrame(comparison_data)
+                                            
+                                            st.markdown("#### 6.1 📋 Monthly Target Calculation Summary")
+                                            
+                                            # Highlight the reference column based on tariff type
+                                            def highlight_reference_peak(row):
+                                                colors = []
+                                                for col in row.index:
+                                                    if col == 'Reference Peak':
+                                                        colors.append('background-color: rgba(0, 255, 0, 0.3)')  # Green highlight
+                                                    elif col == 'TOU Peak (2PM-10PM)' and calc_tariff_type == 'TOU':
+                                                        colors.append('background-color: rgba(255, 255, 0, 0.2)')  # Yellow highlight
+                                                    elif col == 'General Peak (24/7)' and calc_tariff_type == 'General':
+                                                        colors.append('background-color: rgba(255, 255, 0, 0.2)')  # Yellow highlight
+                                                    else:
+                                                        colors.append('')
+                                                return colors
+                                            
+                                            styled_comparison = df_comparison.style.apply(highlight_reference_peak, axis=1)
+                                            st.dataframe(styled_comparison, use_container_width=True, hide_index=True)
+                                            
+                                            st.info(f"""
+                                            **📊 Target Calculation Explanation:**
+                                            - **General Peak**: Highest demand anytime (24/7) 
+                                            - **TOU Peak**: Highest demand during peak period (2PM-10PM weekdays only)
+                                            - **Reference Peak**: Used for target calculation based on {calc_tariff_type} tariff
+                                            - **Target MD**: {target_description}
+                                            - 🟢 **Green**: Reference peak used for calculations
+                                            - 🟡 **Yellow**: Peak type matching selected tariff
+                                            """)
                                     
                                 except Exception as e:
                                     st.error(f"❌ Error calculating V2 monthly targets: {str(e)}")
