@@ -2939,6 +2939,160 @@ error_10min = forecast_10min - actual_value
 #         st.error("Power column not found in data")
 # 
 # 
+def _create_v2_conditional_demand_line_with_dynamic_targets(fig, df, power_col, target_series, selected_tariff=None, holidays=None, trace_name="Original Demand"):
+    """
+    V2 ENHANCEMENT: Enhanced conditional coloring logic for Original Demand line with DYNAMIC monthly targets.
+    Creates continuous line segments with different colors based on monthly target conditions.
+    
+    Key V2 Innovation: Uses dynamic monthly targets instead of static averaging for color decisions.
+    
+    Color Logic:
+    - Red: Above monthly target during Peak Periods (based on selected tariff) - Direct MD cost impact
+    - Green: Above monthly target during Off-Peak Periods - No MD cost impact  
+    - Blue: Below monthly target (any time) - Within acceptable limits
+    
+    Args:
+        fig: Plotly figure to add traces to
+        df: Simulation dataframe
+        power_col: Power column name
+        target_series: V2's dynamic monthly target series (same index as df)
+        selected_tariff: Tariff configuration for period classification
+        holidays: Set of holiday dates
+        trace_name: Name for the trace
+        
+    Returns:
+        Modified plotly figure with colored demand line segments
+    """
+    from tariffs.peak_logic import is_peak_rp4, get_period_classification
+    
+    # Validate inputs
+    if target_series is None or len(target_series) == 0:
+        st.warning("⚠️ V2 Dynamic Coloring: target_series is empty, falling back to single average")
+        # Fallback to V1 approach with average target
+        avg_target = df[power_col].quantile(0.9)
+        return create_conditional_demand_line_with_peak_logic(fig, df, power_col, avg_target, selected_tariff, holidays, trace_name)
+    
+    # Convert index to datetime if it's not already
+    if not pd.api.types.is_datetime64_any_dtype(df.index):
+        df_copy = df.copy()
+        df_copy.index = pd.to_datetime(df.index)
+    else:
+        df_copy = df
+    
+    # Create a series with color classifications using DYNAMIC monthly targets
+    df_copy = df_copy.copy()
+    df_copy['color_class'] = ''
+    
+    for i in range(len(df_copy)):
+        timestamp = df_copy.index[i]
+        demand_value = df_copy.iloc[i][power_col]
+        
+        # V2 ENHANCEMENT: Get DYNAMIC monthly target for this specific timestamp
+        if timestamp in target_series.index:
+            current_target = target_series.loc[timestamp]
+        else:
+            # Fallback to closest available target
+            month_period = timestamp.to_period('M')
+            available_periods = [t.to_period('M') for t in target_series.index if not pd.isna(target_series.loc[t])]
+            if available_periods:
+                closest_period_timestamp = min(target_series.index, 
+                                             key=lambda t: abs((timestamp - t).total_seconds()))
+                current_target = target_series.loc[closest_period_timestamp]
+            else:
+                current_target = df[power_col].quantile(0.9)  # Safe fallback
+        
+        # Get MD window classification using RP4 2-period system
+        is_md = is_peak_rp4(timestamp, holidays)
+        period_type = 'Peak' if is_md else 'Off-Peak'
+        
+        # V2 LOGIC: Color classification using dynamic monthly target
+        if demand_value > current_target:
+            if period_type == 'Peak':
+                df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'red'
+            else:
+                df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'green'
+        else:
+            df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'blue'
+    
+    # Create continuous line segments with color-coded segments
+    x_data = df_copy.index
+    y_data = df_copy[power_col]
+    colors = df_copy['color_class']
+    
+    # Track legend status
+    legend_added = {'red': False, 'green': False, 'blue': False}
+    
+    # Create continuous line segments by color groups with bridge points
+    i = 0
+    while i < len(df_copy):
+        current_color = colors.iloc[i]
+        
+        # Find the end of current color segment
+        j = i
+        while j < len(colors) and colors.iloc[j] == current_color:
+            j += 1
+        
+        # Extract segment data
+        segment_x = list(x_data[i:j])
+        segment_y = list(y_data[i:j])
+        
+        # Add bridge points for better continuity (connect to adjacent segments)
+        if i > 0:  # Add connection point from previous segment
+            segment_x.insert(0, x_data[i-1])
+            segment_y.insert(0, y_data[i-1])
+        
+        if j < len(colors):  # Add connection point to next segment
+            segment_x.append(x_data[j])
+            segment_y.append(y_data[j])
+        
+        # Determine trace name based on color and tariff type
+        tariff_description = _get_tariff_description(selected_tariff) if selected_tariff else "RP4 Peak Period"
+        
+        # Check if it's a TOU tariff for enhanced hover info
+        is_tou = False
+        if selected_tariff:
+            tariff_type = selected_tariff.get('Type', '').lower()
+            tariff_name = selected_tariff.get('Tariff', '').lower()
+            is_tou = tariff_type == 'tou' or 'tou' in tariff_name
+        
+        if current_color == 'red':
+            segment_name = f'{trace_name} (Above Target - {tariff_description})'
+            if is_tou:
+                hover_info = f'<b>Above Monthly Target - TOU Peak Rate Period</b><br><i>High Energy Cost + MD Cost Impact</i><br><i>Using V2 Dynamic Monthly Targets</i>'
+            else:
+                hover_info = f'<b>Above Monthly Target - General Tariff</b><br><i>MD Cost Impact Only (Flat Energy Rate)</i><br><i>Using V2 Dynamic Monthly Targets</i>'
+        elif current_color == 'green':
+            segment_name = f'{trace_name} (Above Target - Off-Peak)'
+            if is_tou:
+                hover_info = '<b>Above Monthly Target - TOU Off-Peak</b><br><i>Low Energy Cost, No MD Impact</i><br><i>Using V2 Dynamic Monthly Targets</i>'
+            else:
+                hover_info = '<b>Above Monthly Target - General Tariff</b><br><i>This should not appear for General tariffs</i><br><i>Using V2 Dynamic Monthly Targets</i>'
+        else:  # blue
+            segment_name = f'{trace_name} (Below Target)'
+            hover_info = '<b>Below Monthly Target</b><br><i>Within Acceptable Limits</i><br><i>Using V2 Dynamic Monthly Targets</i>'
+        
+        # Only show legend for the first occurrence of each color
+        show_legend = not legend_added[current_color]
+        legend_added[current_color] = True
+        
+        # Add line segment
+        fig.add_trace(go.Scatter(
+            x=segment_x,
+            y=segment_y,
+            mode='lines',
+            line=dict(color=current_color, width=2),
+            name=segment_name,
+            hovertemplate=f'{trace_name}: %{{y:.2f}} kW<br>%{{x}}<br>{hover_info}<extra></extra>',
+            showlegend=show_legend,
+            legendgroup=current_color,
+            connectgaps=True  # Connect gaps within segments
+        ))
+        
+        i = j
+    
+    return fig
+
+
 def _render_v2_peak_events_timeline(df, power_col, selected_tariff, holidays, target_method, shave_percent, target_percent, target_manual_kw, target_description):
     """Render the V2 Peak Events Timeline visualization with dynamic monthly-based targets and enhanced color logic."""
     
@@ -6382,159 +6536,6 @@ if __name__ == "__main__":
 #         else:
 #             return 1000.0  # Safe fallback
 # 
-# 
-def _create_v2_conditional_demand_line_with_dynamic_targets(fig, df, power_col, target_series, selected_tariff=None, holidays=None, trace_name="Original Demand"):
-    """
-    V2 ENHANCEMENT: Enhanced conditional coloring logic for Original Demand line with DYNAMIC monthly targets.
-    Creates continuous line segments with different colors based on monthly target conditions.
-    
-    Key V2 Innovation: Uses dynamic monthly targets instead of static averaging for color decisions.
-    
-    Color Logic:
-    - Red: Above monthly target during Peak Periods (based on selected tariff) - Direct MD cost impact
-    - Green: Above monthly target during Off-Peak Periods - No MD cost impact  
-    - Blue: Below monthly target (any time) - Within acceptable limits
-    
-    Args:
-        fig: Plotly figure to add traces to
-        df: Simulation dataframe
-        power_col: Power column name
-        target_series: V2's dynamic monthly target series (same index as df)
-        selected_tariff: Tariff configuration for period classification
-        holidays: Set of holiday dates
-        trace_name: Name for the trace
-        
-    Returns:
-        Modified plotly figure with colored demand line segments
-    """
-    from tariffs.peak_logic import is_peak_rp4, get_period_classification
-    
-    # Validate inputs
-    if target_series is None or len(target_series) == 0:
-        st.warning("⚠️ V2 Dynamic Coloring: target_series is empty, falling back to single average")
-        # Fallback to V1 approach with average target
-        avg_target = df[power_col].quantile(0.9)
-        return create_conditional_demand_line_with_peak_logic(fig, df, power_col, avg_target, selected_tariff, holidays, trace_name)
-    
-    # Convert index to datetime if it's not already
-    if not pd.api.types.is_datetime64_any_dtype(df.index):
-        df_copy = df.copy()
-        df_copy.index = pd.to_datetime(df.index)
-    else:
-        df_copy = df
-    
-    # Create a series with color classifications using DYNAMIC monthly targets
-    df_copy = df_copy.copy()
-    df_copy['color_class'] = ''
-    
-    for i in range(len(df_copy)):
-        timestamp = df_copy.index[i]
-        demand_value = df_copy.iloc[i][power_col]
-        
-        # V2 ENHANCEMENT: Get DYNAMIC monthly target for this specific timestamp
-        if timestamp in target_series.index:
-            current_target = target_series.loc[timestamp]
-        else:
-            # Fallback to closest available target
-            month_period = timestamp.to_period('M')
-            available_periods = [t.to_period('M') for t in target_series.index if not pd.isna(target_series.loc[t])]
-            if available_periods:
-                closest_period_timestamp = min(target_series.index, 
-                                             key=lambda t: abs((timestamp - t).total_seconds()))
-                current_target = target_series.loc[closest_period_timestamp]
-            else:
-                current_target = df[power_col].quantile(0.9)  # Safe fallback
-        
-        # Get MD window classification using RP4 2-period system
-        is_md = is_peak_rp4(timestamp, holidays)
-        period_type = 'Peak' if is_md else 'Off-Peak'
-        
-        # V2 LOGIC: Color classification using dynamic monthly target
-        if demand_value > current_target:
-            if period_type == 'Peak':
-                df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'red'
-            else:
-                df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'green'
-        else:
-            df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'blue'
-    
-    # Create continuous line segments with color-coded segments
-    x_data = df_copy.index
-    y_data = df_copy[power_col]
-    colors = df_copy['color_class']
-    
-    # Track legend status
-    legend_added = {'red': False, 'green': False, 'blue': False}
-    
-    # Create continuous line segments by color groups with bridge points
-    i = 0
-    while i < len(df_copy):
-        current_color = colors.iloc[i]
-        
-        # Find the end of current color segment
-        j = i
-        while j < len(colors) and colors.iloc[j] == current_color:
-            j += 1
-        
-        # Extract segment data
-        segment_x = list(x_data[i:j])
-        segment_y = list(y_data[i:j])
-        
-        # Add bridge points for better continuity (connect to adjacent segments)
-        if i > 0:  # Add connection point from previous segment
-            segment_x.insert(0, x_data[i-1])
-            segment_y.insert(0, y_data[i-1])
-        
-        if j < len(colors):  # Add connection point to next segment
-            segment_x.append(x_data[j])
-            segment_y.append(y_data[j])
-        
-        # Determine trace name based on color and tariff type
-        tariff_description = _get_tariff_description(selected_tariff) if selected_tariff else "RP4 Peak Period"
-        
-        # Check if it's a TOU tariff for enhanced hover info
-        is_tou = False
-        if selected_tariff:
-            tariff_type = selected_tariff.get('Type', '').lower()
-            tariff_name = selected_tariff.get('Tariff', '').lower()
-            is_tou = tariff_type == 'tou' or 'tou' in tariff_name
-        
-        if current_color == 'red':
-            segment_name = f'{trace_name} (Above Target - {tariff_description})'
-            if is_tou:
-                hover_info = f'<b>Above Monthly Target - TOU Peak Rate Period</b><br><i>High Energy Cost + MD Cost Impact</i><br><i>Using V2 Dynamic Monthly Targets</i>'
-            else:
-                hover_info = f'<b>Above Monthly Target - General Tariff</b><br><i>MD Cost Impact Only (Flat Energy Rate)</i><br><i>Using V2 Dynamic Monthly Targets</i>'
-        elif current_color == 'green':
-            segment_name = f'{trace_name} (Above Target - Off-Peak)'
-            if is_tou:
-                hover_info = '<b>Above Monthly Target - TOU Off-Peak</b><br><i>Low Energy Cost, No MD Impact</i><br><i>Using V2 Dynamic Monthly Targets</i>'
-            else:
-                hover_info = '<b>Above Monthly Target - General Tariff</b><br><i>This should not appear for General tariffs</i><br><i>Using V2 Dynamic Monthly Targets</i>'
-        else:  # blue
-            segment_name = f'{trace_name} (Below Target)'
-            hover_info = '<b>Below Monthly Target</b><br><i>Within Acceptable Limits</i><br><i>Using V2 Dynamic Monthly Targets</i>'
-        
-        # Only show legend for the first occurrence of each color
-        show_legend = not legend_added[current_color]
-        legend_added[current_color] = True
-        
-        # Add line segment
-        fig.add_trace(go.Scatter(
-            x=segment_x,
-            y=segment_y,
-            mode='lines',
-            line=dict(color=current_color, width=2),
-            name=segment_name,
-            hovertemplate=f'{trace_name}: %{{y:.2f}} kW<br>%{{x}}<br>{hover_info}<extra></extra>',
-            showlegend=show_legend,
-            legendgroup=current_color,
-            connectgaps=True  # Connect gaps within segments
-        ))
-        
-        i = j
-    
-    return fig
 # 
 # 
 # # ==========================================
