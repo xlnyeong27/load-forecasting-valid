@@ -1447,18 +1447,87 @@ def render_md_shaving_v2():
                     except Exception as e:
                         st.error(f"❌ Error in peak events analysis: {str(e)}")
                     
-                    # Battery Sizing Analysis (immediately after peak events)
+                    # Monthly Summary Table (after peak events detection)
                     try:
                         if 'peak_events' in locals() and peak_events:
-                            # Calculate battery sizing requirements from peak events data
+                            # Generate monthly summary table
+                            monthly_summary_df = _generate_monthly_summary_table(
+                                peak_events, selected_tariff, holidays
+                            )
+                            
+                            if not monthly_summary_df.empty:
+                                st.markdown("#### 6.3.2 📅 Monthly Summary")
+                                st.caption("Maximum MD excess and energy requirements aggregated by month")
+                                
+                                # Display the monthly summary table
+                                st.dataframe(monthly_summary_df, use_container_width=True, hide_index=True)
+                                
+                                # Add summary metrics below the monthly summary table
+                                col1, col2, col3 = st.columns(3)
+                                
+                                # Calculate totals from the monthly summary
+                                total_months = len(monthly_summary_df)
+                                
+                                # Find the column names dynamically (could be "TOU" or "General")
+                                md_excess_col = [col for col in monthly_summary_df.columns if 'MD Excess' in col]
+                                energy_col = [col for col in monthly_summary_df.columns if 'Required Energy' in col]
+                                
+                                if md_excess_col and energy_col:
+                                    max_monthly_md_excess = monthly_summary_df[md_excess_col[0]].max()
+                                    max_monthly_energy = monthly_summary_df[energy_col[0]].max()
+                                    
+                                    col1.metric("Total Months", total_months)
+                                    col2.metric("Max Monthly MD Excess", f"{max_monthly_md_excess:.2f} kW")
+                                    col3.metric("Max Monthly Required Energy", f"{max_monthly_energy:.2f} kWh")
+                                else:
+                                    st.warning("Could not extract summary metrics from monthly data")
+                                    
+                            else:
+                                st.info("No monthly summary data available.")
+                                
+                    except Exception as e:
+                        st.error(f"❌ Error generating monthly summary table: {str(e)}")
+                    
+                    # Battery Sizing Analysis (using Monthly Summary data)
+                    try:
+                        if 'peak_events' in locals() and peak_events and 'monthly_summary_df' in locals() and not monthly_summary_df.empty:
+                            # Use values from Monthly Summary table for accurate battery sizing
+                            md_excess_col = [col for col in monthly_summary_df.columns if 'MD Excess' in col]
+                            energy_col = [col for col in monthly_summary_df.columns if 'Required Energy' in col]
+                            
+                            if md_excess_col and energy_col:
+                                max_power_shaving_required = monthly_summary_df[md_excess_col[0]].max()
+                                max_required_energy = monthly_summary_df[energy_col[0]].max()
+                                total_months = len(monthly_summary_df)
+                                total_md_cost = sum([event.get('MD Cost Impact (RM)', 0) for event in peak_events]) if peak_events else 0
+                                
+                                if max_power_shaving_required > 0:
+                                    st.markdown("### 6.5 🔋 Battery Sizing Analysis")
+                                    
+                                    # Display key metrics using Monthly Summary data
+                                    col1, col2, col3 = st.columns(3)
+                                    with col1:
+                                        st.metric("Total Months", total_months)
+                                    with col2:
+                                        st.metric("Max Monthly MD Excess", f"{max_power_shaving_required:.2f} kW")
+                                    with col3:
+                                        st.metric("Max Monthly Required Energy", f"{max_required_energy:.2f} kWh")
+                                
+                                    # Call the battery sizing analysis function
+                                    _render_battery_sizing_analysis(max_power_shaving_required, max_required_energy, total_md_cost)
+                            else:
+                                st.warning("Could not extract MD excess and energy columns from Monthly Summary data")
+                        elif 'peak_events' in locals() and peak_events:
+                            # Fallback to individual peak events calculation if Monthly Summary is not available
                             max_power_shaving_required = max([event.get('General Excess (kW)', 0) for event in peak_events]) if peak_events else 0
                             max_required_energy = max([event.get('General Required Energy (kWh)', 0) for event in peak_events]) if peak_events else 0
                             total_md_cost = sum([event.get('MD Cost Impact (RM)', 0) for event in peak_events]) if peak_events else 0
                             
                             if max_power_shaving_required > 0:
                                 st.markdown("### 6.5 🔋 Battery Sizing Analysis")
+                                st.warning("⚠️ Using individual peak events data (Monthly Summary not available)")
                                 
-                                # Display key metrics
+                                # Display key metrics using fallback calculation
                                 col1, col2, col3 = st.columns(3)
                                 with col1:
                                     st.metric("Total Months", len(set([event.get('Start Date', '') for event in peak_events])))
