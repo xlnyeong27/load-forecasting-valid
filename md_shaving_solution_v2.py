@@ -2396,106 +2396,231 @@ error_10min = forecast_10min - actual_value
                                                                                 p90 = row.get('residual_p90', np.nan)
                                                                                 st.write(f"• {horizon}min: P10={p10:.1f}kW, P90={p90:.1f}kW")
                                                                         
-                                                                        # Split long format tables by horizon
-                                                                        st.markdown("#### 📊 Forecast Tables by Horizon (P10/P50/P90)")
+                                                                        # Interactive P90 Forecast Visualization
+                                                                        st.markdown("#### 🎯 Interactive P90 Forecast Analysis")
                                                                         
-                                                                        # Prepare display columns
-                                                                        display_cols = ['t', 'actual', 'forecast_p10', 'forecast_p50', 'forecast_p90']
-                                                                        available_cols = [col for col in display_cols if col in df_long_with_bands.columns]
+                                                                        # Interactive controls
+                                                                        col_controls1, col_controls2 = st.columns(2)
                                                                         
-                                                                        # Create columns for side-by-side display
-                                                                        col_1min, col_10min = st.columns(2)
+                                                                        with col_controls1:
+                                                                            # Horizon selection
+                                                                            available_horizons = sorted(df_long_with_bands['horizon_min'].unique())
+                                                                            default_horizon = 5 if 5 in available_horizons else available_horizons[0]
+                                                                            selected_horizon = st.radio(
+                                                                                "🕒 Select Forecast Horizon",
+                                                                                options=available_horizons,
+                                                                                index=available_horizons.index(default_horizon),
+                                                                                format_func=lambda x: f"{int(x)} minutes",
+                                                                                help="Choose a single horizon for detailed analysis"
+                                                                            )
                                                                         
-                                                                        # 1-minute forecast table
-                                                                        with col_1min:
-                                                                            st.markdown("##### 🕐 1-Minute Forecast")
-                                                                            df_1min = df_long_with_bands[df_long_with_bands['horizon_min'] == 1][available_cols]
-                                                                            if not df_1min.empty:
-                                                                                # Show first 15 rows for 1-minute forecasts
-                                                                                sample_1min = df_1min.head(15).copy()
-                                                                                # Format timestamp for better display
-                                                                                if 't' in sample_1min.columns:
-                                                                                    sample_1min['Time'] = sample_1min['t'].dt.strftime('%H:%M:%S')
-                                                                                    display_1min = sample_1min[['Time'] + [col for col in available_cols if col != 't']]
-                                                                                else:
-                                                                                    display_1min = sample_1min
-                                                                                st.dataframe(display_1min, use_container_width=True, height=400)
-                                                                                st.caption(f"Showing 15 of {len(df_1min)} 1-minute forecasts")
+                                                                        with col_controls2:
+                                                                            # Date range selection
+                                                                            if not df_long_with_bands.empty:
+                                                                                min_date = df_long_with_bands['t'].min().date()
+                                                                                max_date = df_long_with_bands['t'].max().date()
+                                                                                
+                                                                                st.markdown("📅 **Date Range Selection**")
+                                                                                date_range = st.date_input(
+                                                                                    "Select date range",
+                                                                                    value=(min_date, max_date),
+                                                                                    min_value=min_date,
+                                                                                    max_value=max_date,
+                                                                                    help="Select start and end dates for analysis"
+                                                                                )
+                                                                        
+                                                                        # Filter data based on selections
+                                                                        if not df_long_with_bands.empty and date_range:
+                                                                            # Handle single date or date range
+                                                                            if isinstance(date_range, tuple) and len(date_range) == 2:
+                                                                                start_date, end_date = date_range
                                                                             else:
-                                                                                st.info("No 1-minute forecast data available")
-                                                                        
-                                                                        # 10-minute forecast table  
-                                                                        with col_10min:
-                                                                            st.markdown("##### 🕙 10-Minute Forecast")
-                                                                            df_10min = df_long_with_bands[df_long_with_bands['horizon_min'] == 10][available_cols]
-                                                                            if not df_10min.empty:
-                                                                                # Show first 15 rows for 10-minute forecasts
-                                                                                sample_10min = df_10min.head(15).copy()
-                                                                                # Format timestamp for better display
-                                                                                if 't' in sample_10min.columns:
-                                                                                    sample_10min['Time'] = sample_10min['t'].dt.strftime('%H:%M:%S')
-                                                                                    display_10min = sample_10min[['Time'] + [col for col in available_cols if col != 't']]
-                                                                                else:
-                                                                                    display_10min = sample_10min
-                                                                                st.dataframe(display_10min, use_container_width=True, height=400)
-                                                                                st.caption(f"Showing 15 of {len(df_10min)} 10-minute forecasts")
-                                                                            else:
-                                                                                st.info("No 10-minute forecast data available")
-                                                                        
-                                                                        # Forecast comparison summary
-                                                                        st.markdown("#### 🔍 Horizon Comparison Summary")
-                                                                        
-                                                                        col_summary1, col_summary2, col_summary3 = st.columns(3)
-                                                                        
-                                                                        # Calculate summary metrics for comparison
-                                                                        df_1min_summary = df_long_with_bands[df_long_with_bands['horizon_min'] == 1]
-                                                                        df_10min_summary = df_long_with_bands[df_long_with_bands['horizon_min'] == 10]
-                                                                        
-                                                                        with col_summary1:
-                                                                            st.markdown("**📊 Data Points**")
-                                                                            st.metric("1-min Forecasts", len(df_1min_summary))
-                                                                            st.metric("10-min Forecasts", len(df_10min_summary))
-                                                                        
-                                                                        with col_summary2:
-                                                                            st.markdown("**📏 Uncertainty Band Width**")
-                                                                            if not df_1min_summary.empty and 'forecast_p10' in df_1min_summary.columns:
-                                                                                band_1min = (df_1min_summary['forecast_p90'] - df_1min_summary['forecast_p10']).mean()
-                                                                                st.metric("1-min Avg Band", f"{band_1min:.1f} kW")
-                                                                            else:
-                                                                                st.metric("1-min Avg Band", "N/A")
+                                                                                start_date = end_date = date_range
                                                                             
-                                                                            if not df_10min_summary.empty and 'forecast_p10' in df_10min_summary.columns:
-                                                                                band_10min = (df_10min_summary['forecast_p90'] - df_10min_summary['forecast_p10']).mean()
-                                                                                st.metric("10-min Avg Band", f"{band_10min:.1f} kW")
-                                                                            else:
-                                                                                st.metric("10-min Avg Band", "N/A")
-                                                                        
-                                                                        with col_summary3:
-                                                                            st.markdown("**🎯 Forecast Accuracy**")
-                                                                            if not df_1min_summary.empty and 'actual' in df_1min_summary.columns:
-                                                                                mae_1min = abs(df_1min_summary['forecast_p50'] - df_1min_summary['actual']).mean()
-                                                                                st.metric("1-min MAE", f"{mae_1min:.1f} kW")
-                                                                            else:
-                                                                                st.metric("1-min MAE", "N/A")
+                                                                            # Filter by horizon and date range
+                                                                            filtered_df = df_long_with_bands[
+                                                                                (df_long_with_bands['horizon_min'] == selected_horizon) &
+                                                                                (df_long_with_bands['t'].dt.date >= start_date) &
+                                                                                (df_long_with_bands['t'].dt.date <= end_date)
+                                                                            ].copy().sort_values('t')
                                                                             
-                                                                            if not df_10min_summary.empty and 'actual' in df_10min_summary.columns:
-                                                                                mae_10min = abs(df_10min_summary['forecast_p50'] - df_10min_summary['actual']).mean()
-                                                                                st.metric("10-min MAE", f"{mae_10min:.1f} kW")
+                                                                            if not filtered_df.empty:
+                                                                                # Create focused forecast table
+                                                                                st.markdown(f"##### 📊 {int(selected_horizon)}-Minute Forecast Table")
+                                                                                
+                                                                                # Prepare display DataFrame
+                                                                                display_cols = ['t', 'actual', 'forecast_p10', 'forecast_p50', 'forecast_p90']
+                                                                                available_cols = [col for col in display_cols if col in filtered_df.columns]
+                                                                                
+                                                                                display_df = filtered_df[available_cols].copy()
+                                                                                if 't' in display_df.columns:
+                                                                                    display_df['Time'] = display_df['t'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                                                                                    display_df = display_df[['Time'] + [col for col in available_cols if col != 't']]
+                                                                                
+                                                                                # Show filtered table
+                                                                                st.dataframe(display_df.head(20), use_container_width=True, height=300)
+                                                                                st.caption(f"Showing first 20 of {len(filtered_df)} records for {int(selected_horizon)}-minute horizon")
+                                                                                
+                                                                                # Generate P90 visualization for selected horizon
+                                                                                st.markdown(f"##### 📈 {int(selected_horizon)}-Minute Forecast Visualization with P10-P90 Bands")
+                                                                                
+                                                                                # Create the plot
+                                                                                fig_p90 = go.Figure()
+                                                                                
+                                                                                # Add P10-P90 shaded band
+                                                                                if 'forecast_p10' in filtered_df.columns and 'forecast_p90' in filtered_df.columns:
+                                                                                    fig_p90.add_trace(go.Scatter(
+                                                                                        x=filtered_df['t'],
+                                                                                        y=filtered_df['forecast_p90'],
+                                                                                        mode='lines',
+                                                                                        line=dict(color='rgba(0,0,0,0)'),
+                                                                                        showlegend=False,
+                                                                                        hoverinfo='skip'
+                                                                                    ))
+                                                                                    
+                                                                                    fig_p90.add_trace(go.Scatter(
+                                                                                        x=filtered_df['t'],
+                                                                                        y=filtered_df['forecast_p10'],
+                                                                                        mode='lines',
+                                                                                        line=dict(color='rgba(0,0,0,0)'),
+                                                                                        fill='tonexty',
+                                                                                        fillcolor='rgba(128, 128, 128, 0.3)',
+                                                                                        name='P10-P90 Uncertainty Band',
+                                                                                        hovertemplate='P10-P90 Band<br>Time: %{x}<br>P10: %{y:.2f} kW<extra></extra>'
+                                                                                    ))
+                                                                                
+                                                                                # Add actual values
+                                                                                if 'actual' in filtered_df.columns:
+                                                                                    fig_p90.add_trace(go.Scatter(
+                                                                                        x=filtered_df['t'],
+                                                                                        y=filtered_df['actual'],
+                                                                                        mode='lines',
+                                                                                        line=dict(color='blue', width=2),
+                                                                                        name='Actual Load',
+                                                                                        hovertemplate='Actual: %{y:.2f} kW<br>Time: %{x}<extra></extra>'
+                                                                                    ))
+                                                                                
+                                                                                # Add P50 forecast
+                                                                                if 'forecast_p50' in filtered_df.columns:
+                                                                                    fig_p90.add_trace(go.Scatter(
+                                                                                        x=filtered_df['t'],
+                                                                                        y=filtered_df['forecast_p50'],
+                                                                                        mode='lines',
+                                                                                        line=dict(color='red', width=2, dash='dash'),
+                                                                                        name='P50 Forecast',
+                                                                                        hovertemplate='P50 Forecast: %{y:.2f} kW<br>Time: %{x}<extra></extra>'
+                                                                                    ))
+                                                                                
+                                                                                # Update layout
+                                                                                fig_p90.update_layout(
+                                                                                    title=f"{int(selected_horizon)}-Minute Forecast with P10-P90 Uncertainty Bands",
+                                                                                    xaxis_title="Time",
+                                                                                    yaxis_title="Power (kW)",
+                                                                                    height=500,
+                                                                                    showlegend=True,
+                                                                                    hovermode='x unified',
+                                                                                    legend=dict(
+                                                                                        orientation="h",
+                                                                                        yanchor="bottom",
+                                                                                        y=1.02,
+                                                                                        xanchor="right",
+                                                                                        x=1
+                                                                                    )
+                                                                                )
+                                                                                
+                                                                                # Display the plot
+                                                                                st.plotly_chart(fig_p90, use_container_width=True)
+                                                                                
+                                                                                # Show filtered metrics
+                                                                                col_metrics1, col_metrics2, col_metrics3 = st.columns(3)
+                                                                                
+                                                                                with col_metrics1:
+                                                                                    st.metric("Data Points", len(filtered_df))
+                                                                                    
+                                                                                with col_metrics2:
+                                                                                    if 'forecast_p10' in filtered_df.columns and 'forecast_p90' in filtered_df.columns:
+                                                                                        band_width = (filtered_df['forecast_p90'] - filtered_df['forecast_p10']).mean()
+                                                                                        st.metric("Avg Uncertainty Band", f"{band_width:.1f} kW")
+                                                                                    else:
+                                                                                        st.metric("Avg Uncertainty Band", "N/A")
+                                                                                
+                                                                                with col_metrics3:
+                                                                                    if 'actual' in filtered_df.columns and 'forecast_p50' in filtered_df.columns:
+                                                                                        mae = abs(filtered_df['forecast_p50'] - filtered_df['actual']).mean()
+                                                                                        st.metric("MAE", f"{mae:.1f} kW")
+                                                                                    else:
+                                                                                        st.metric("MAE", "N/A")
+                                                                            
                                                                             else:
-                                                                                st.metric("10-min MAE", "N/A")
+                                                                                st.warning(f"⚠️ No data available for {int(selected_horizon)}-minute horizon in the selected date range.")
                                                                         
-                                                                        # Data export options
-                                                                        with st.expander("💾 Export P90 Forecast Data"):
+                                                                        # Export options for filtered data
+                                                                        with st.expander("� Export Filtered Forecast Data"):
+                                                                            if 'filtered_df' in locals() and not filtered_df.empty:
+                                                                                export_df = filtered_df[available_cols].copy()
+                                                                                if 't' in export_df.columns:
+                                                                                    export_df['timestamp'] = export_df['t'].dt.strftime('%Y-%m-%d %H:%M:%S')
+                                                                                    export_df = export_df.drop('t', axis=1)
+                                                                                
+                                                                                st.download_button(
+                                                                                    label=f"📥 Download {int(selected_horizon)}-Min Filtered Forecast",
+                                                                                    data=export_df.to_csv(index=False),
+                                                                                    file_name=f"p90_forecast_{int(selected_horizon)}min_{start_date}_to_{end_date}_{datetime.now().strftime('%H%M')}.csv",
+                                                                                    mime="text/csv",
+                                                                                    help=f"Export {int(selected_horizon)}-minute P90 forecast data for selected date range"
+                                                                                )
+                                                                                
+                                                                                # Summary of exported data
+                                                                                st.info(f"📊 Export contains {len(export_df)} records for {int(selected_horizon)}-minute horizon from {start_date} to {end_date}")
+                                                                            else:
+                                                                                st.warning("No filtered data available for export")
+                                                                        
+                                                                        # Overall horizon comparison  
+                                                                        if len(df_long_with_bands['horizon_min'].unique()) > 1:
+                                                                            st.markdown("#### 📈 All Horizons Overview")
+                                                                            
+                                                                            metrics_col1, metrics_col2, metrics_col3 = st.columns(3)
+                                                                            
+                                                                            with metrics_col1:
+                                                                                # Count data points for each horizon
+                                                                                horizon_counts = df_long_with_bands.groupby('horizon_min').size()
+                                                                                st.markdown("**📊 Total Data Points**")
+                                                                                for horizon, count in horizon_counts.items():
+                                                                                    st.write(f"• {int(horizon)} min: {count:,} points")
+                                                                            
+                                                                            with metrics_col2:
+                                                                                # Calculate uncertainty band widths
+                                                                                if 'forecast_p10' in df_long_with_bands.columns and 'forecast_p90' in df_long_with_bands.columns:
+                                                                                    st.markdown("**🎯 Avg Uncertainty Band**")
+                                                                                    band_widths = df_long_with_bands.groupby('horizon_min').apply(
+                                                                                        lambda x: (x['forecast_p90'] - x['forecast_p10']).mean()
+                                                                                    )
+                                                                                    for horizon, width in band_widths.items():
+                                                                                        st.write(f"• {int(horizon)} min: {width:.1f} kW")
+                                                                            
+                                                                            with metrics_col3:
+                                                                                # Calculate forecast accuracy (MAE) if actual values available
+                                                                                if 'actual' in df_long_with_bands.columns and 'forecast_p50' in df_long_with_bands.columns:
+                                                                                    st.markdown("**🔍 Overall MAE**")
+                                                                                    mae_by_horizon = df_long_with_bands.groupby('horizon_min').apply(
+                                                                                        lambda x: abs(x['forecast_p50'] - x['actual']).mean()
+                                                                                    )
+                                                                                    for horizon, mae in mae_by_horizon.items():
+                                                                                        st.write(f"• {int(horizon)} min: {mae:.1f} kW")
+                                                                        
+                                                                        # Complete dataset export options
+                                                                        with st.expander("💾 Export Complete P90 Forecast Dataset"):
                                                                             col_export1, col_export2 = st.columns(2)
                                                                             
                                                                             with col_export1:
                                                                                 # CSV export
                                                                                 csv_data = df_long_with_bands.to_csv(index=False)
                                                                                 st.download_button(
-                                                                                    label="📄 Download as CSV",
+                                                                                    label="📄 Download Complete Dataset (CSV)",
                                                                                     data=csv_data,
-                                                                                    file_name=f"p90_forecast_long_format_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                                                                                    mime="text/csv"
+                                                                                    file_name=f"p90_forecast_complete_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                                                                    mime="text/csv",
+                                                                                    help="Export all P90 forecast data for all horizons"
                                                                                 )
                                                                             
                                                                             with col_export2:
@@ -2504,10 +2629,11 @@ error_10min = forecast_10min - actual_value
                                                                                 parquet_buffer = io.BytesIO()
                                                                                 df_long_with_bands.to_parquet(parquet_buffer, index=False)
                                                                                 st.download_button(
-                                                                                    label="📦 Download as Parquet",
+                                                                                    label="📦 Download Complete Dataset (Parquet)",
                                                                                     data=parquet_buffer.getvalue(),
-                                                                                    file_name=f"p90_forecast_long_format_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet",
-                                                                                    mime="application/octet-stream"
+                                                                                    file_name=f"p90_forecast_complete_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet",
+                                                                                    mime="application/octet-stream",
+                                                                                    help="Export all P90 forecast data in efficient Parquet format"
                                                                                 )
                                                                     else:
                                                                         st.warning("⚠️ Could not compute residual quantiles - insufficient data")
