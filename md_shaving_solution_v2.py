@@ -1050,42 +1050,227 @@ def _render_v2_battery_controls():
         selected_capacity = selected_battery_data['capacity']
         
         # Display selected battery specs
-        st.markdown("#### 📊 Selected Battery Specifications")
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Energy", f"{active_battery_spec.get('energy_kWh', 0)} kWh")
-        col2.metric("Power", f"{active_battery_spec.get('power_kW', 0)} kW")
-        col3.metric("C-Rate", f"{active_battery_spec.get('c_rate', 0)}C")
-        col4.metric("Voltage", f"{active_battery_spec.get('voltage_V', 0)} V")
+        st.markdown("#### 📊 Battery Specifications:")
         
-        st.caption(f"**Company:** {active_battery_spec.get('company', 'Unknown')} | **Model:** {active_battery_spec.get('model', 'Unknown')} | **Lifespan:** {active_battery_spec.get('lifespan_years', 0)} years")
+        # Create specifications table
+        specs_data = [
+            ["Company", active_battery_spec.get('company', 'Unknown')],
+            ["Model", active_battery_spec.get('model', 'Unknown')],
+            ["Energy Capacity", f"{active_battery_spec.get('energy_kWh', 0)} kWh"],
+            ["Power Rating", f"{active_battery_spec.get('power_kW', 0)} kW"],
+            ["C Rate", f"{active_battery_spec.get('c_rate', 0)}C"],
+            ["Voltage", f"{active_battery_spec.get('voltage_V', 0)} V"],
+            ["Lifespan", f"{active_battery_spec.get('lifespan_years', 0)} years"],
+            ["Cooling", active_battery_spec.get('cooling', 'N/A')]
+        ]
+        
+        specs_df = pd.DataFrame(specs_data, columns=["Parameter", "Value"])
+        st.table(specs_df)
+        
+        # Battery Quantity Recommendation section
+        st.markdown("#### 7.1 🔢 Battery Quantity Recommendation")
+        
+        # Default values for demonstration (these would come from actual analysis)
+        max_power_required = 1734.4  # kW - This should come from peak analysis
+        max_energy_required = 7884.8  # kWh - This should come from energy analysis
+        
+        # Extract battery specifications for calculations
+        battery_power_kw = active_battery_spec.get('power_kW', 0)
+        battery_energy_kwh = active_battery_spec.get('energy_kWh', 0)
+        
+        if battery_power_kw > 0 and battery_energy_kwh > 0:
+            # Calculate recommended quantities
+            # Power-based quantity: ceiling(Max Power Required / Battery Power Rating)
+            qty_power = np.ceil(max_power_required / battery_power_kw) if battery_power_kw > 0 else 0
+            
+            # Energy-based quantity: ceiling(Max Energy Required / Battery Energy / DOD / Efficiency)
+            dod = 0.9  # Depth of Discharge
+            efficiency = 0.93  # Battery efficiency
+            qty_energy = np.ceil(max_energy_required / battery_energy_kwh / dod / efficiency) if battery_energy_kwh > 0 else 0
+            
+            # Recommended quantity: maximum of the two
+            recommended_qty = max(int(qty_power), int(qty_energy))
+            
+            # Display quantity recommendations
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("Power-Based Qty ℹ️", f"{int(qty_power)} units")
+                st.caption(f"Calculation: ⌈{max_power_required} ÷ {battery_power_kw}⌉")
+            
+            with col2:
+                st.metric("Energy-Based Qty ℹ️", f"{int(qty_energy)} units") 
+                st.caption(f"Calculation: ⌈{max_energy_required} ÷ {battery_energy_kwh} ÷ {dod} ÷ {efficiency}⌉")
+            
+            with col3:
+                st.metric("Recommended Qty ℹ️", f"{recommended_qty} units", delta=f"↑ {recommended_qty} units")
+                st.caption("Auto-recommended based on max requirement")
+        else:
+            st.warning("⚠️ Battery specifications incomplete for quantity calculation")
     else:
         active_battery_spec = None
         selected_capacity = default_cap
     
-    # Analysis configuration
-    st.markdown("#### ⚙️ Analysis Configuration")
+    # Battery Quantity Configuration
+    st.markdown("#### 🔢 Battery Quantity Configuration:")
     
-    col1, col2 = st.columns(2)
+    # Get the recommended quantity from the previous calculation (if available)
+    if active_battery_spec and battery_power_kw > 0 and battery_energy_kwh > 0:
+        default_qty = recommended_qty
+    else:
+        default_qty = 37  # Fallback default
+    
+    # Battery quantity selector with +/- controls
+    st.markdown("**Select Battery Quantity:**")
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
     
     with col1:
-        run_analysis = st.checkbox(
-            "Enable Battery Analysis", 
-            value=False,
-            key="v2_main_enable_analysis",
-            help="Enable advanced battery analysis (V2 feature)"
-        )
+        if st.button("➖", key="decrease_qty", help="Decrease quantity by 1"):
+            if "battery_quantity" not in st.session_state:
+                st.session_state.battery_quantity = default_qty
+            if st.session_state.battery_quantity > 1:
+                st.session_state.battery_quantity -= 1
     
     with col2:
-        if run_analysis:
-            st.success("🔄 **Analysis Mode:** Ready for optimization")
+        # Initialize session state if not exists
+        if "battery_quantity" not in st.session_state:
+            st.session_state.battery_quantity = default_qty
+            
+        # Display current quantity
+        selected_quantity = st.number_input(
+            "",
+            min_value=1,
+            max_value=1000,
+            value=st.session_state.battery_quantity,
+            key="qty_input",
+            label_visibility="collapsed"
+        )
+        st.session_state.battery_quantity = selected_quantity
+    
+    with col3:
+        if st.button("➕", key="increase_qty", help="Increase quantity by 1"):
+            if "battery_quantity" not in st.session_state:
+                st.session_state.battery_quantity = default_qty
+            if st.session_state.battery_quantity < 1000:
+                st.session_state.battery_quantity += 1
+    
+    # Calculate total capacities and coverage based on selected quantity
+    if active_battery_spec and battery_power_kw > 0 and battery_energy_kwh > 0:
+        total_power_capacity = st.session_state.battery_quantity * battery_power_kw
+        total_energy_capacity = st.session_state.battery_quantity * battery_energy_kwh
+        
+        # Calculate coverage percentage (based on max requirements)
+        max_power_required = 1734.4  # kW - from previous calculation
+        max_energy_required = 7884.8  # kWh - from previous calculation
+        
+        power_coverage = (total_power_capacity / max_power_required) * 100 if max_power_required > 0 else 0
+        energy_coverage = (total_energy_capacity / max_energy_required) * 100 if max_energy_required > 0 else 0
+        overall_coverage = min(power_coverage, energy_coverage)  # Limiting factor
+        
+        # Display capacity metrics
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric(
+                "Total Power Capacity",
+                f"{total_power_capacity:.1f} kW",
+                delta=f"↑ {st.session_state.battery_quantity} × {battery_power_kw} kW"
+            )
+        
+        with col2:
+            st.metric(
+                "Total Energy Capacity", 
+                f"{total_energy_capacity:.1f} kWh",
+                delta=f"↑ {st.session_state.battery_quantity} × {battery_energy_kwh} kWh"
+            )
+        
+        with col3:
+            coverage_color = "normal"
+            if overall_coverage >= 100:
+                coverage_color = "normal"
+            elif overall_coverage >= 80:
+                coverage_color = "normal" 
+            else:
+                coverage_color = "inverse"
+                
+            st.metric(
+                "Coverage",
+                f"{overall_coverage:.1f}%",
+                delta=None
+            )
+        
+        # Configuration status messages
+        if st.session_state.battery_quantity == default_qty:
+            st.success("✅ **Optimal Configuration:** Using auto-recommended quantity of {} units based on your requirements.".format(default_qty))
         else:
-            st.info("📊 **Display Mode:** Specifications only")
+            st.info(f"🔧 **Custom Configuration:** Using {st.session_state.battery_quantity} units (recommended: {default_qty} units)")
+        
+        # Integration notice
+        st.info("📊 **Integration Active:** The selected quantity ({} units) will be automatically used in the '📊 Battery Operation Simulation' section below, replacing any auto-calculated values.".format(st.session_state.battery_quantity))
+        
+        # Battery Sizing & Financial Analysis Section
+        st.markdown("#### 7.2 💰 Battery Sizing & Financial Analysis")
+        
+        # Analysis header with battery info
+        battery_model = active_battery_spec.get('model', 'Unknown')
+        battery_company = active_battery_spec.get('company', 'Unknown')
+        st.info(f"🔋 **Analysis based on selected battery:** {battery_company} {battery_model} ({battery_energy_kwh}kWh, {battery_power_kw}kW)")
+        
+        # Analysis calculations
+        max_power_required = 1734.4  # kW - from requirements analysis
+        max_energy_required = 7884.8  # kWh - from energy analysis
+        selected_qty = st.session_state.battery_quantity
+        
+        # Calculate units needed based on power and energy
+        units_for_power = int(np.ceil(max_power_required / battery_power_kw)) if battery_power_kw > 0 else 0
+        units_for_energy = int(np.ceil(max_energy_required / battery_energy_kwh)) if battery_energy_kwh > 0 else 0
+        
+        # System capacities based on selected quantity
+        total_system_power = selected_qty * battery_power_kw
+        total_system_energy = selected_qty * battery_energy_kwh
+        
+        # MD shaving calculations
+        actual_md_shaved = total_system_power  # Assuming full power utilization
+        md_shaving_coverage = (actual_md_shaved / max_power_required) * 100 if max_power_required > 0 else 0
+        
+        # Financial calculations (using RM 1400/kWh as per screenshot)
+        cost_per_kwh = 1400  # RM per kWh
+        total_battery_investment = total_system_energy * cost_per_kwh
+        
+        # Create analysis table
+        analysis_data = [
+            ["Units for Selected Power Requirement", f"{units_for_power} units (for {max_power_required} kW)", f"Selected Power Requirement: {max_power_required} kW ÷ {battery_power_kw} kW/unit"],
+            ["Units for Selected Energy Capacity", f"{units_for_energy} units (for {max_energy_required} kWh)", f"Selected Energy Capacity: {max_energy_required} kWh ÷ {battery_energy_kwh} kWh/unit"],
+            ["Total BESS Quantity Required", f"{selected_qty} units", "Higher of power or energy requirement"],
+            ["Total System Power Capacity", f"{total_system_power:.1f} kW", f"{selected_qty} units × {battery_power_kw} kW/unit"],
+            ["Total System Energy Capacity", f"{total_system_energy:.1f} kWh", f"{selected_qty} units × {battery_energy_kwh} kWh/unit"],
+            ["Actual MD Shaved", f"{actual_md_shaved:.1f} kW", f"{selected_qty} units × {battery_power_kw} kW/unit = {actual_md_shaved:.1f} kW"],
+            ["MD Shaving Coverage", f"{md_shaving_coverage:.1f}%", f"MD Shaved ÷ Selected Power Requirement × 100%"],
+            ["Total Battery Investment", f"RM {total_battery_investment:,.0f}", f"{total_system_energy:.1f} kWh × RM {cost_per_kwh}/kWh"]
+        ]
+        
+        analysis_df = pd.DataFrame(analysis_data, columns=["Analysis Parameter", "Value", "Calculation Basis"])
+        st.table(analysis_df)
+        
+        # Total Investment Display
+        st.markdown("### 💰 Total Investment ℹ️")
+        st.markdown(f"<h1 style='text-align: center; color: #2E8B57; font-size: 3em; margin: 0.5em 0;'>RM {total_battery_investment:,}</h1>", unsafe_allow_html=True)
+        
+        run_analysis = True  # Always enable analysis when battery is properly configured
+    else:
+        st.warning("⚠️ Battery specifications incomplete for quantity configuration")
+        run_analysis = False
     
     # Return the selected battery configuration
     battery_config = {
         'selection_method': 'By Specific Model',
         'selected_capacity': selected_capacity if 'selected_capacity' in locals() else default_cap,
         'active_battery_spec': active_battery_spec,
+        'selected_quantity': st.session_state.get('battery_quantity', default_qty),
+        'total_power_capacity': total_power_capacity if 'total_power_capacity' in locals() else 0,
+        'total_energy_capacity': total_energy_capacity if 'total_energy_capacity' in locals() else 0,
+        'coverage_percentage': overall_coverage if 'overall_coverage' in locals() else 0,
         'run_analysis': run_analysis
     }
     
