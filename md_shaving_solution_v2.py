@@ -1741,6 +1741,103 @@ def render_md_shaving_v2():
                             
                             # Additional V2 Analysis Features
                             st.info("🔄 **Additional V2 analysis features integrated and ready for testing.**")
+                            
+                            # Forecasting Section
+                            st.markdown("---")  # Separator line
+                            st.subheader("📈 Forecasting")
+                            
+                            # Forecasting enable/disable checkbox
+                            enable_forecasting = st.checkbox(
+                                "Enable Forecasting",
+                                value=False,
+                                key="v2_enable_forecasting",
+                                help="Enable advanced forecasting capabilities for demand prediction and optimization"
+                            )
+                            
+                            if enable_forecasting:
+                                st.success("🔮 **Forecasting Mode:** Advanced prediction capabilities activated")
+                                
+                                # Forecasting Method Selection
+                                st.markdown("#### 🔧 Forecasting Method Selection")
+                                
+                                # Define available forecasting methods
+                                forecasting_methods = {
+                                    "Rate of Change (ROC)": {
+                                        "description": "Analyzes demand patterns based on historical rate of change trends",
+                                        "status": "Available",
+                                        "complexity": "Medium",
+                                        "accuracy": "Good for short-term predictions"
+                                    },
+                                    "Linear Regression": {
+                                        "description": "Statistical method using linear relationships in historical data",
+                                        "status": "Coming Soon",
+                                        "complexity": "Low",
+                                        "accuracy": "Moderate for trend-based data"
+                                    },
+                                    "ARIMA (AutoRegressive Integrated Moving Average)": {
+                                        "description": "Time series forecasting using autoregressive and moving average components",
+                                        "status": "Planned",
+                                        "complexity": "High",
+                                        "accuracy": "High for seasonal data"
+                                    },
+                                    "Prophet": {
+                                        "description": "Facebook's forecasting tool designed for business time series data",
+                                        "status": "Planned",
+                                        "complexity": "Medium",
+                                        "accuracy": "Excellent for seasonal patterns"
+                                    },
+                                    "LSTM Neural Networks": {
+                                        "description": "Deep learning approach for complex pattern recognition in time series",
+                                        "status": "Future Release",
+                                        "complexity": "Very High",
+                                        "accuracy": "Excellent for complex patterns"
+                                    }
+                                }
+                                
+                                # Method selection dropdown
+                                method_names = list(forecasting_methods.keys())
+                                selected_method = st.selectbox(
+                                    "Select Forecasting Method:",
+                                    options=method_names,
+                                    index=0,  # Default to ROC
+                                    key="forecasting_method_selection",
+                                    help="Choose the forecasting algorithm for demand prediction"
+                                )
+                                
+                                # Display method details in a table
+                                if selected_method:
+                                    method_details = forecasting_methods[selected_method]
+                                    
+                                    st.markdown("##### � Method Details")
+                                    
+                                    # Create method details table
+                                    method_info = [
+                                        ["Method", selected_method],
+                                        ["Description", method_details["description"]],
+                                        ["Status", method_details["status"]],
+                                        ["Complexity", method_details["complexity"]],
+                                        ["Accuracy", method_details["accuracy"]]
+                                    ]
+                                    
+                                    method_df = pd.DataFrame(method_info, columns=["Parameter", "Details"])
+                                    st.table(method_df)
+                                    
+                                    # Status-based messaging
+                                    if method_details["status"] == "Available":
+                                        st.success(f"✅ **{selected_method}** is ready for use")
+                                        st.info("🔧 Method configuration and execution will be implemented here")
+                                    elif method_details["status"] == "Coming Soon":
+                                        st.warning(f"⏳ **{selected_method}** implementation in progress")
+                                        st.info("📅 Expected availability in next release")
+                                    elif method_details["status"] == "Planned":
+                                        st.info(f"📋 **{selected_method}** is planned for future development")
+                                        st.info("🗓️ Scheduled for upcoming releases")
+                                    else:  # Future Release
+                                        st.info(f"🚀 **{selected_method}** scheduled for future release")
+                                        st.info("💡 Advanced feature under research and development")
+                                
+                            else:
+                                st.info("📈 **Standard Mode:** Enable forecasting to access prediction features")
                                 
                         else:
                             st.info("💡 Configure battery settings above to see the V2 functionality.")
