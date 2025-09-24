@@ -601,6 +601,403 @@ def build_daily_simulator_structure(df, threshold_kw, clusters_df, selected_tari
     return days_struct
 
 
+def _calculate_roc_from_series(series, power_col=None):
+    """
+    Calculate Rate of Change (ROC) in kW per minute from a pandas Series or DataFrame.
+    Reuses logic from load_forecasting.py _calculate_roc function.
+    
+    Args:
+        series: pandas Series with datetime index and power values, or DataFrame with power column
+        power_col: column name if series is a DataFrame (optional if Series)
+    
+    Returns:
+        pandas DataFrame with Timestamp, Power (kW), and ROC (kW/min) columns
+    """
+    # Handle both Series and DataFrame inputs
+    if isinstance(series, pd.Series):
+        df_processed = pd.DataFrame({power_col or 'Power': series})
+        power_col = power_col or 'Power'
+    else:
+        df_processed = series.copy()
+        if power_col is None:
+            # Use first numeric column if power_col not specified
+            numeric_cols = df_processed.select_dtypes(include=[np.number]).columns
+            if len(numeric_cols) == 0:
+                raise ValueError("No numeric columns found in DataFrame")
+            power_col = numeric_cols[0]
+    
+    # Ensure datetime index
+    if not isinstance(df_processed.index, pd.DatetimeIndex):
+        raise ValueError("Series/DataFrame must have datetime index")
+    
+    df_roc = df_processed.copy()
+    
+    # Calculate time differences in minutes (reusing load_forecasting.py logic)
+    df_roc['time_diff_min'] = df_roc.index.to_series().diff().dt.total_seconds() / 60
+    
+    # Calculate power differences
+    df_roc['power_diff_kw'] = df_roc[power_col].diff()
+    
+    # Calculate ROC (kW per minute)
+    df_roc['roc_kw_per_min'] = df_roc['power_diff_kw'] / df_roc['time_diff_min']
+    
+    # Create clean output dataframe (matching load_forecasting.py format)
+    roc_df = pd.DataFrame({
+        'Timestamp': df_roc.index,
+        'Power (kW)': df_roc[power_col],
+        'ROC (kW/min)': df_roc['roc_kw_per_min']
+    })
+    
+    return roc_df
+
+
+def roc_forecast(series, horizon=1, power_col=None):
+    """
+    Generate horizon-minute ahead forecasts for all data points using Rate of Change (ROC) method.
+    Reuses existing ROC calculation logic from load_forecasting.py.
+    
+    This function generates forecasts for ALL points in the series, not rolling forecasts.
+    For each point t, it forecasts the value at t+horizon using the ROC at time t.
+    
+    Args:
+        series: pandas Series with datetime index and power values, or DataFrame with power column
+        horizon: forecast horizon in minutes (default: 1)
+        power_col: column name if series is a DataFrame (optional if Series)
+    
+    Returns:
+        pandas DataFrame with columns:
+        - Timestamp: original timestamp
+        - Power_Actual (kW): actual power at timestamp
+        - ROC (kW/min): rate of change at timestamp
+        - Forecast_Timestamp: timestamp + horizon
+        - Power_Forecast (kW): forecasted power value
+        - Forecast_Available: boolean indicating if forecast could be made
+    
+    Examples:
+        # Using Series
+        forecast_df = roc_forecast(power_series, horizon=5)
+        
+        # Using DataFrame
+        forecast_df = roc_forecast(df, horizon=1, power_col='Power_kW')
+    """
+    
+    # Validate inputs
+    if not isinstance(series, (pd.Series, pd.DataFrame)):
+        raise ValueError("Input must be a pandas Series or DataFrame")
+    
+    if horizon <= 0:
+        raise ValueError("Horizon must be positive")
+    
+    # Calculate ROC using existing logic
+    try:
+        roc_df = _calculate_roc_from_series(series, power_col)
+    except Exception as e:
+        raise ValueError(f"Error calculating ROC: {str(e)}")
+    
+    # Generate forecasts for all points
+    forecasts = []
+    
+    for idx, row in roc_df.iterrows():
+        timestamp = row['Timestamp']
+        power_actual = row['Power (kW)']
+        roc_value = row['ROC (kW/min)']
+        
+        # Calculate forecast timestamp
+        forecast_timestamp = timestamp + pd.Timedelta(minutes=horizon)
+        
+        # Generate forecast using ROC method (reusing load_forecasting.py logic)
+        # P_hat = P_now + ROC_now * h
+        if pd.isna(roc_value):
+            # Cannot make forecast without ROC (typically first data point)
+            power_forecast = np.nan
+            forecast_available = False
+        else:
+            power_forecast = power_actual + roc_value * horizon
+            forecast_available = True
+        
+        forecasts.append({
+            'Timestamp': timestamp,
+            'Power_Actual (kW)': power_actual,
+            'ROC (kW/min)': roc_value,
+            'Forecast_Timestamp': forecast_timestamp,
+            'Power_Forecast (kW)': power_forecast,
+            'Forecast_Available': forecast_available
+        })
+    
+    forecast_df = pd.DataFrame(forecasts)
+    
+    return forecast_df
+
+
+def roc_forecast_with_validation(series, horizon=1, power_col=None, return_metrics=False):
+    """
+    Generate ROC forecasts and validate against actual future values where available.
+    Extended version of roc_forecast that includes validation metrics.
+    
+    Args:
+        series: pandas Series with datetime index and power values, or DataFrame with power column
+        horizon: forecast horizon in minutes (default: 1)
+        power_col: column name if series is a DataFrame (optional if Series)
+        return_metrics: if True, return summary metrics along with forecast DataFrame
+    
+    Returns:
+        pandas DataFrame with forecast + validation columns, optionally metrics dict
+    """
+    
+    # Generate basic forecasts
+    forecast_df = roc_forecast(series, horizon, power_col)
+    
+    # Prepare original data for validation
+    if isinstance(series, pd.Series):
+        original_data = pd.DataFrame({'Power': series})
+        power_col = power_col or 'Power'
+    else:
+        original_data = series.copy()
+        if power_col is None:
+            numeric_cols = original_data.select_dtypes(include=[np.number]).columns
+            power_col = numeric_cols[0]
+    
+    # Add validation columns
+    validation_results = []
+    
+    for idx, row in forecast_df.iterrows():
+        result = row.to_dict()
+        
+        if row['Forecast_Available']:
+            forecast_timestamp = row['Forecast_Timestamp']
+            
+            # Find actual value at forecast timestamp
+            try:
+                # Try exact match first
+                if forecast_timestamp in original_data.index:
+                    actual_future = original_data.loc[forecast_timestamp, power_col]
+                    validation_available = True
+                else:
+                    # Try nearest time match
+                    time_diffs = (original_data.index - forecast_timestamp).abs()
+                    nearest_idx = time_diffs.idxmin()
+                    
+                    # Only use if within reasonable tolerance (e.g., half the horizon)
+                    tolerance = pd.Timedelta(minutes=horizon/2)
+                    if time_diffs.min() <= tolerance:
+                        actual_future = original_data.loc[nearest_idx, power_col]
+                        validation_available = True
+                    else:
+                        actual_future = np.nan
+                        validation_available = False
+            except:
+                actual_future = np.nan
+                validation_available = False
+            
+            # Calculate validation metrics
+            if validation_available and not pd.isna(actual_future):
+                forecast_error = row['Power_Forecast (kW)'] - actual_future
+                abs_error = abs(forecast_error)
+                if actual_future != 0:
+                    pct_error = (abs_error / abs(actual_future)) * 100
+                else:
+                    pct_error = np.nan
+            else:
+                actual_future = np.nan
+                forecast_error = np.nan
+                abs_error = np.nan
+                pct_error = np.nan
+                validation_available = False
+        else:
+            # No forecast available
+            actual_future = np.nan
+            forecast_error = np.nan
+            abs_error = np.nan
+            pct_error = np.nan
+            validation_available = False
+        
+        # Add validation columns
+        result.update({
+            'Power_Actual_Future (kW)': actual_future,
+            'Forecast_Error (kW)': forecast_error,
+            'Absolute_Error (kW)': abs_error,
+            'Percentage_Error (%)': pct_error,
+            'Validation_Available': validation_available
+        })
+        
+        validation_results.append(result)
+    
+    validated_forecast_df = pd.DataFrame(validation_results)
+    
+    # Calculate summary metrics if requested
+    if return_metrics:
+        valid_forecasts = validated_forecast_df[
+            (validated_forecast_df['Forecast_Available']) & 
+            (validated_forecast_df['Validation_Available'])
+        ].copy()
+        
+        if len(valid_forecasts) > 0:
+            metrics = {
+                'total_points': len(forecast_df),
+                'forecasts_made': len(validated_forecast_df[validated_forecast_df['Forecast_Available']]),
+                'validations_available': len(valid_forecasts),
+                'validation_rate': len(valid_forecasts) / len(validated_forecast_df[validated_forecast_df['Forecast_Available']]) * 100,
+                'mae_kw': valid_forecasts['Absolute_Error (kW)'].mean(),
+                'rmse_kw': np.sqrt((valid_forecasts['Forecast_Error (kW)'] ** 2).mean()),
+                'mean_pct_error': valid_forecasts['Percentage_Error (%)'].mean(),
+                'median_pct_error': valid_forecasts['Percentage_Error (%)'].median(),
+                'bias_kw': valid_forecasts['Forecast_Error (kW)'].mean()
+            }
+        else:
+            metrics = {
+                'total_points': len(forecast_df),
+                'forecasts_made': 0,
+                'validations_available': 0,
+                'validation_rate': 0,
+                'mae_kw': np.nan,
+                'rmse_kw': np.nan,
+                'mean_pct_error': np.nan,
+                'median_pct_error': np.nan,
+                'bias_kw': np.nan
+            }
+        
+        return validated_forecast_df, metrics
+    
+    return validated_forecast_df
+
+
+def convert_roc_backtest_to_long_format(forecast_series_dict, actual_series_dict, horizons):
+    """
+    Convert ROC backtest results to long format table with columns: t, horizon_min, actual, forecast_p50
+    
+    Args:
+        forecast_series_dict: Dictionary of {horizon: forecast_series}
+        actual_series_dict: Dictionary of {horizon: actual_series} 
+        horizons: List of forecast horizons in minutes
+        
+    Returns:
+        pd.DataFrame: Long format table with columns [t, horizon_min, actual, forecast_p50]
+    """
+    try:
+        long_data = []
+        
+        for horizon in horizons:
+            if horizon in forecast_series_dict and horizon in actual_series_dict:
+                forecast_series = forecast_series_dict[horizon]
+                actual_series = actual_series_dict[horizon]
+                
+                # Align series by index (timestamp)
+                aligned_forecast, aligned_actual = forecast_series.align(actual_series, join='inner')
+                
+                for timestamp in aligned_forecast.index:
+                    if pd.notna(aligned_forecast.loc[timestamp]) and pd.notna(aligned_actual.loc[timestamp]):
+                        long_data.append({
+                            't': timestamp,
+                            'horizon_min': horizon,
+                            'actual': aligned_actual.loc[timestamp],
+                            'forecast_p50': aligned_forecast.loc[timestamp]
+                        })
+        
+        if long_data:
+            df_long = pd.DataFrame(long_data)
+            df_long = df_long.sort_values(['t', 'horizon_min']).reset_index(drop=True)
+            return df_long
+        else:
+            return pd.DataFrame(columns=['t', 'horizon_min', 'actual', 'forecast_p50'])
+    
+    except Exception as e:
+        print(f"Error converting ROC backtest to long format: {e}")
+        return pd.DataFrame(columns=['t', 'horizon_min', 'actual', 'forecast_p50'])
+
+
+def compute_residual_quantiles_by_horizon(df_long, quantiles=[0.1, 0.5, 0.9]):
+    """
+    Compute residual quantiles by horizon from long format backtest results
+    
+    Args:
+        df_long: DataFrame with columns [t, horizon_min, actual, forecast_p50]
+        quantiles: List of quantiles to compute (default: [0.1, 0.5, 0.9] for P10, P50, P90)
+        
+    Returns:
+        pd.DataFrame: Quantiles by horizon with columns [horizon_min, residual_p10, residual_p50, residual_p90]
+    """
+    try:
+        if df_long.empty or 'actual' not in df_long.columns or 'forecast_p50' not in df_long.columns:
+            return pd.DataFrame(columns=['horizon_min', 'residual_p10', 'residual_p50', 'residual_p90'])
+        
+        # Calculate residuals (forecast - actual)
+        df_long = df_long.copy()
+        df_long['residual'] = df_long['forecast_p50'] - df_long['actual']
+        
+        # Group by horizon and compute quantiles
+        quantile_results = []
+        for horizon in sorted(df_long['horizon_min'].unique()):
+            horizon_data = df_long[df_long['horizon_min'] == horizon]
+            residuals = horizon_data['residual'].dropna()
+            
+            if len(residuals) > 0:
+                quantile_values = residuals.quantile(quantiles).values
+                result = {'horizon_min': horizon}
+                
+                # Map quantiles to column names
+                for i, q in enumerate(quantiles):
+                    if q == 0.1:
+                        result['residual_p10'] = quantile_values[i]
+                    elif q == 0.5:
+                        result['residual_p50'] = quantile_values[i]
+                    elif q == 0.9:
+                        result['residual_p90'] = quantile_values[i]
+                
+                quantile_results.append(result)
+        
+        if quantile_results:
+            return pd.DataFrame(quantile_results)
+        else:
+            return pd.DataFrame(columns=['horizon_min', 'residual_p10', 'residual_p50', 'residual_p90'])
+    
+    except Exception as e:
+        print(f"Error computing residual quantiles: {e}")
+        return pd.DataFrame(columns=['horizon_min', 'residual_p10', 'residual_p50', 'residual_p90'])
+
+
+def generate_p90_forecast_bands(df_long, residual_quantiles):
+    """
+    Generate P90 forecast bands by adding residual quantiles to P50 forecasts
+    
+    Args:
+        df_long: DataFrame with columns [t, horizon_min, actual, forecast_p50]
+        residual_quantiles: DataFrame with quantiles by horizon
+        
+    Returns:
+        pd.DataFrame: Long format with added columns [forecast_p10, forecast_p90]
+    """
+    try:
+        if df_long.empty or residual_quantiles.empty:
+            return df_long.copy()
+        
+        df_result = df_long.copy()
+        
+        # Initialize new columns
+        df_result['forecast_p10'] = np.nan
+        df_result['forecast_p90'] = np.nan
+        
+        # Add quantiles by horizon
+        for _, row in residual_quantiles.iterrows():
+            horizon = row['horizon_min']
+            horizon_mask = df_result['horizon_min'] == horizon
+            
+            if 'residual_p10' in row and pd.notna(row['residual_p10']):
+                df_result.loc[horizon_mask, 'forecast_p10'] = (
+                    df_result.loc[horizon_mask, 'forecast_p50'] + row['residual_p10']
+                )
+            
+            if 'residual_p90' in row and pd.notna(row['residual_p90']):
+                df_result.loc[horizon_mask, 'forecast_p90'] = (
+                    df_result.loc[horizon_mask, 'forecast_p50'] + row['residual_p90']
+                )
+        
+        return df_result
+    
+    except Exception as e:
+        print(f"Error generating P90 forecast bands: {e}")
+        return df_long.copy()
+
+
 def load_vendor_battery_database():
     """Load vendor battery database from JSON file."""
     try:
@@ -1825,7 +2222,319 @@ def render_md_shaving_v2():
                                     # Status-based messaging
                                     if method_details["status"] == "Available":
                                         st.success(f"✅ **{selected_method}** is ready for use")
-                                        st.info("🔧 Method configuration and execution will be implemented here")
+                                        
+                                        # ROC Method Implementation
+                                        if selected_method == "Rate of Change (ROC)":
+                                            st.markdown("#### 🔧 ROC Forecasting Configuration")
+                                            
+                                            # Configuration controls
+                                            col1, col2 = st.columns(2)
+                                            
+                                            with col1:
+                                                horizons = st.multiselect(
+                                                    "Forecast Horizons (minutes)",
+                                                    options=[1, 5, 10, 15, 20, 30],
+                                                    default=[1, 10],
+                                                    help="Select forecast horizons for backtesting analysis"
+                                                )
+                                            
+                                            with col2:
+                                                enable_backtesting = st.checkbox(
+                                                    "Enable Historical Backtesting",
+                                                    value=True,
+                                                    help="Generate forecasts for all historical data points"
+                                                )
+                                            
+                                            if enable_backtesting and horizons:
+                                                with st.spinner("🔄 Generating ROC forecasts for historical backtesting..."):
+                                                    try:
+                                                        # Generate time series forecasts for each horizon
+                                                        forecast_series = {}
+                                                        validation_metrics = {}
+                                                        
+                                                        for horizon in horizons:
+                                                            # Use our ROC forecast function with validation
+                                                            validated_df, metrics = roc_forecast_with_validation(
+                                                                df_processed[power_col], 
+                                                                horizon=horizon, 
+                                                                return_metrics=True
+                                                            )
+                                                            
+                                                            # Create clean time series aligned to actual timestamps
+                                                            # Each forecast[t] predicts the value at t+horizon
+                                                            forecast_ts = pd.Series(
+                                                                validated_df['Power_Forecast (kW)'].values,
+                                                                index=validated_df['Forecast_Timestamp'],
+                                                                name=f'Forecast_{horizon}min'
+                                                            )
+                                                            
+                                                            # Store aligned forecast series and metrics
+                                                            forecast_series[f'forecast_{horizon}min'] = forecast_ts
+                                                            validation_metrics[horizon] = metrics
+                                                        
+                                                        # Store in session state for future use
+                                                        st.session_state['roc_forecast_series'] = forecast_series
+                                                        st.session_state['roc_validation_metrics'] = validation_metrics
+                                                        st.session_state['roc_actual_series'] = df_processed[power_col]
+                                                        
+                                                        # Display summary
+                                                        st.success("✅ ROC forecasting completed successfully!")
+                                                        
+                                                        # Summary metrics
+                                                        col1, col2, col3 = st.columns(3)
+                                                        
+                                                        with col1:
+                                                            st.metric("Horizons Generated", len(horizons))
+                                                        
+                                                        with col2:
+                                                            total_forecasts = sum(
+                                                                metrics['forecasts_made'] 
+                                                                for metrics in validation_metrics.values()
+                                                            )
+                                                            st.metric("Total Forecasts", total_forecasts)
+                                                        
+                                                        with col3:
+                                                            avg_validation_rate = np.mean([
+                                                                metrics['validation_rate'] 
+                                                                for metrics in validation_metrics.values()
+                                                            ])
+                                                            st.metric("Avg Validation Rate", f"{avg_validation_rate:.1f}%")
+                                                        
+                                                        # Performance summary table
+                                                        st.markdown("#### 📊 Forecast Performance Summary")
+                                                        
+                                                        perf_data = []
+                                                        for horizon in sorted(horizons):
+                                                            metrics = validation_metrics[horizon]
+                                                            perf_data.append({
+                                                                'Horizon (min)': horizon,
+                                                                'Forecasts Made': metrics['forecasts_made'],
+                                                                'Validations Available': metrics['validations_available'],
+                                                                'Validation Rate (%)': f"{metrics['validation_rate']:.1f}",
+                                                                'MAE (kW)': f"{metrics['mae_kw']:.2f}" if not pd.isna(metrics['mae_kw']) else "N/A",
+                                                                'RMSE (kW)': f"{metrics['rmse_kw']:.2f}" if not pd.isna(metrics['rmse_kw']) else "N/A",
+                                                                'Mean % Error': f"{metrics['mean_pct_error']:.2f}%" if not pd.isna(metrics['mean_pct_error']) else "N/A",
+                                                                'Bias (kW)': f"{metrics['bias_kw']:.2f}" if not pd.isna(metrics['bias_kw']) else "N/A"
+                                                            })
+                                                        
+                                                        perf_df = pd.DataFrame(perf_data)
+                                                        st.dataframe(perf_df, use_container_width=True)
+                                                        
+                                                        # Data structure info
+                                                        with st.expander("📋 Generated Time Series Info"):
+                                                            st.markdown("**Time Series Structure:**")
+                                                            for horizon in horizons:
+                                                                series_name = f'forecast_{horizon}min'
+                                                                series = forecast_series[series_name]
+                                                                st.write(f"- `{series_name}[t]`: {len(series)} points, forecasts value at t+{horizon} minutes")
+                                                                st.write(f"  - Time range: {series.index.min()} to {series.index.max()}")
+                                                                st.write(f"  - Available forecasts: {series.notna().sum()}")
+                                                            
+                                                            st.markdown("**Actual Series:**")
+                                                            actual = df_processed[power_col]
+                                                            st.write(f"- `actual[t]`: {len(actual)} points")
+                                                            st.write(f"  - Time range: {actual.index.min()} to {actual.index.max()}")
+                                                            
+                                                            st.markdown("**Direct Comparison Ready:**")
+                                                            st.write("Each forecast series is aligned to target timestamps for direct comparison:")
+                                                            st.code("""
+# Example comparison at any timestamp t:
+actual_value = actual[t]
+forecast_1min = forecast_1min[t]  # Predicted 1 minute ago  
+forecast_10min = forecast_10min[t]  # Predicted 10 minutes ago
+
+# Error calculation:
+error_1min = forecast_1min - actual_value
+error_10min = forecast_10min - actual_value
+                                                            """)
+                                                        
+                                                        # P90 Forecasting Section
+                                                        st.markdown("#### 🎯 P90 Forecast Generation")
+                                                        
+                                                        with st.spinner("🔄 Generating P90 forecast bands from historical residuals..."):
+                                                            try:
+                                                                # Convert ROC backtest results to long format
+                                                                forecast_dict = {}
+                                                                actual_dict = {}
+                                                                
+                                                                for horizon in horizons:
+                                                                    series_name = f'forecast_{horizon}min'
+                                                                    forecast_dict[horizon] = forecast_series[series_name]
+                                                                    actual_dict[horizon] = df_processed[power_col]
+                                                                
+                                                                # Convert to long format
+                                                                df_long = convert_roc_backtest_to_long_format(
+                                                                    forecast_dict, actual_dict, horizons
+                                                                )
+                                                                
+                                                                if not df_long.empty:
+                                                                    # Compute residual quantiles by horizon
+                                                                    residual_quantiles = compute_residual_quantiles_by_horizon(df_long)
+                                                                    
+                                                                    if not residual_quantiles.empty:
+                                                                        # Generate P90 forecast bands
+                                                                        df_long_with_bands = generate_p90_forecast_bands(df_long, residual_quantiles)
+                                                                        
+                                                                        # Store results in session state
+                                                                        st.session_state['roc_long_format'] = df_long_with_bands
+                                                                        st.session_state['residual_quantiles'] = residual_quantiles
+                                                                        
+                                                                        # Display results
+                                                                        col1, col2 = st.columns(2)
+                                                                        
+                                                                        with col1:
+                                                                            st.success("✅ P90 bands generated successfully!")
+                                                                            st.metric("Long Format Records", len(df_long_with_bands))
+                                                                            st.metric("Horizons with Quantiles", len(residual_quantiles))
+                                                                        
+                                                                        with col2:
+                                                                            # Show residual quantiles summary
+                                                                            st.markdown("**Residual Quantiles by Horizon:**")
+                                                                            for _, row in residual_quantiles.iterrows():
+                                                                                horizon = row['horizon_min']
+                                                                                p10 = row.get('residual_p10', np.nan)
+                                                                                p90 = row.get('residual_p90', np.nan)
+                                                                                st.write(f"• {horizon}min: P10={p10:.1f}kW, P90={p90:.1f}kW")
+                                                                        
+                                                                        # Split long format tables by horizon
+                                                                        st.markdown("#### 📊 Forecast Tables by Horizon (P10/P50/P90)")
+                                                                        
+                                                                        # Prepare display columns
+                                                                        display_cols = ['t', 'actual', 'forecast_p10', 'forecast_p50', 'forecast_p90']
+                                                                        available_cols = [col for col in display_cols if col in df_long_with_bands.columns]
+                                                                        
+                                                                        # Create columns for side-by-side display
+                                                                        col_1min, col_10min = st.columns(2)
+                                                                        
+                                                                        # 1-minute forecast table
+                                                                        with col_1min:
+                                                                            st.markdown("##### 🕐 1-Minute Forecast")
+                                                                            df_1min = df_long_with_bands[df_long_with_bands['horizon_min'] == 1][available_cols]
+                                                                            if not df_1min.empty:
+                                                                                # Show first 15 rows for 1-minute forecasts
+                                                                                sample_1min = df_1min.head(15).copy()
+                                                                                # Format timestamp for better display
+                                                                                if 't' in sample_1min.columns:
+                                                                                    sample_1min['Time'] = sample_1min['t'].dt.strftime('%H:%M:%S')
+                                                                                    display_1min = sample_1min[['Time'] + [col for col in available_cols if col != 't']]
+                                                                                else:
+                                                                                    display_1min = sample_1min
+                                                                                st.dataframe(display_1min, use_container_width=True, height=400)
+                                                                                st.caption(f"Showing 15 of {len(df_1min)} 1-minute forecasts")
+                                                                            else:
+                                                                                st.info("No 1-minute forecast data available")
+                                                                        
+                                                                        # 10-minute forecast table  
+                                                                        with col_10min:
+                                                                            st.markdown("##### 🕙 10-Minute Forecast")
+                                                                            df_10min = df_long_with_bands[df_long_with_bands['horizon_min'] == 10][available_cols]
+                                                                            if not df_10min.empty:
+                                                                                # Show first 15 rows for 10-minute forecasts
+                                                                                sample_10min = df_10min.head(15).copy()
+                                                                                # Format timestamp for better display
+                                                                                if 't' in sample_10min.columns:
+                                                                                    sample_10min['Time'] = sample_10min['t'].dt.strftime('%H:%M:%S')
+                                                                                    display_10min = sample_10min[['Time'] + [col for col in available_cols if col != 't']]
+                                                                                else:
+                                                                                    display_10min = sample_10min
+                                                                                st.dataframe(display_10min, use_container_width=True, height=400)
+                                                                                st.caption(f"Showing 15 of {len(df_10min)} 10-minute forecasts")
+                                                                            else:
+                                                                                st.info("No 10-minute forecast data available")
+                                                                        
+                                                                        # Forecast comparison summary
+                                                                        st.markdown("#### 🔍 Horizon Comparison Summary")
+                                                                        
+                                                                        col_summary1, col_summary2, col_summary3 = st.columns(3)
+                                                                        
+                                                                        # Calculate summary metrics for comparison
+                                                                        df_1min_summary = df_long_with_bands[df_long_with_bands['horizon_min'] == 1]
+                                                                        df_10min_summary = df_long_with_bands[df_long_with_bands['horizon_min'] == 10]
+                                                                        
+                                                                        with col_summary1:
+                                                                            st.markdown("**📊 Data Points**")
+                                                                            st.metric("1-min Forecasts", len(df_1min_summary))
+                                                                            st.metric("10-min Forecasts", len(df_10min_summary))
+                                                                        
+                                                                        with col_summary2:
+                                                                            st.markdown("**📏 Uncertainty Band Width**")
+                                                                            if not df_1min_summary.empty and 'forecast_p10' in df_1min_summary.columns:
+                                                                                band_1min = (df_1min_summary['forecast_p90'] - df_1min_summary['forecast_p10']).mean()
+                                                                                st.metric("1-min Avg Band", f"{band_1min:.1f} kW")
+                                                                            else:
+                                                                                st.metric("1-min Avg Band", "N/A")
+                                                                            
+                                                                            if not df_10min_summary.empty and 'forecast_p10' in df_10min_summary.columns:
+                                                                                band_10min = (df_10min_summary['forecast_p90'] - df_10min_summary['forecast_p10']).mean()
+                                                                                st.metric("10-min Avg Band", f"{band_10min:.1f} kW")
+                                                                            else:
+                                                                                st.metric("10-min Avg Band", "N/A")
+                                                                        
+                                                                        with col_summary3:
+                                                                            st.markdown("**🎯 Forecast Accuracy**")
+                                                                            if not df_1min_summary.empty and 'actual' in df_1min_summary.columns:
+                                                                                mae_1min = abs(df_1min_summary['forecast_p50'] - df_1min_summary['actual']).mean()
+                                                                                st.metric("1-min MAE", f"{mae_1min:.1f} kW")
+                                                                            else:
+                                                                                st.metric("1-min MAE", "N/A")
+                                                                            
+                                                                            if not df_10min_summary.empty and 'actual' in df_10min_summary.columns:
+                                                                                mae_10min = abs(df_10min_summary['forecast_p50'] - df_10min_summary['actual']).mean()
+                                                                                st.metric("10-min MAE", f"{mae_10min:.1f} kW")
+                                                                            else:
+                                                                                st.metric("10-min MAE", "N/A")
+                                                                        
+                                                                        # Data export options
+                                                                        with st.expander("💾 Export P90 Forecast Data"):
+                                                                            col_export1, col_export2 = st.columns(2)
+                                                                            
+                                                                            with col_export1:
+                                                                                # CSV export
+                                                                                csv_data = df_long_with_bands.to_csv(index=False)
+                                                                                st.download_button(
+                                                                                    label="📄 Download as CSV",
+                                                                                    data=csv_data,
+                                                                                    file_name=f"p90_forecast_long_format_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                                                                                    mime="text/csv"
+                                                                                )
+                                                                            
+                                                                            with col_export2:
+                                                                                # Parquet export (more efficient for large datasets)
+                                                                                import io
+                                                                                parquet_buffer = io.BytesIO()
+                                                                                df_long_with_bands.to_parquet(parquet_buffer, index=False)
+                                                                                st.download_button(
+                                                                                    label="📦 Download as Parquet",
+                                                                                    data=parquet_buffer.getvalue(),
+                                                                                    file_name=f"p90_forecast_long_format_{datetime.now().strftime('%Y%m%d_%H%M%S')}.parquet",
+                                                                                    mime="application/octet-stream"
+                                                                                )
+                                                                    else:
+                                                                        st.warning("⚠️ Could not compute residual quantiles - insufficient data")
+                                                                else:
+                                                                    st.warning("⚠️ Could not convert to long format - no valid forecast/actual pairs found")
+                                                                    
+                                                            except Exception as e:
+                                                                st.error(f"❌ Error generating P90 forecasts: {str(e)}")
+                                                                import traceback
+                                                                st.error(f"Traceback: {traceback.format_exc()}")
+                                                        
+                                                        st.info("💾 **Data Ready:** P90 forecast bands are generated and stored for visualization and analysis")
+                                                        
+                                                    except Exception as e:
+                                                        st.error(f"❌ Error generating ROC forecasts: {str(e)}")
+                                                        import traceback
+                                                        with st.expander("🐛 Debug Information"):
+                                                            st.code(traceback.format_exc())
+                                            
+                                            elif enable_backtesting and not horizons:
+                                                st.warning("⚠️ Please select at least one forecast horizon")
+                                            
+                                            elif not enable_backtesting:
+                                                st.info("📊 **Configuration Mode:** Enable backtesting to generate historical forecasts")
+                                        
+                                        else:
+                                            st.info("🔧 Method configuration and execution will be implemented here")
                                     elif method_details["status"] == "Coming Soon":
                                         st.warning(f"⏳ **{selected_method}** implementation in progress")
                                         st.info("📅 Expected availability in next release")
@@ -4244,12 +4953,9 @@ def _render_v2_peak_events_timeline(df, power_col, selected_tariff, holidays, ta
 #         bool: True if timestamp is within MD recording window (peak period)
 #     """
 #     return is_peak_rp4(timestamp, holidays)
-# 
-# 
-# if __name__ == "__main__":
-#     # For testing purposes
-#     render_md_shaving_v2()
-# 
+if __name__ == "__main__":
+    # For testing purposes
+    render_md_shaving_v2()
 # 
 # def cluster_peak_events(events_df, battery_params, md_hours, working_days):
 #     """
