@@ -1020,97 +1020,47 @@ def _render_v2_battery_controls():
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        selection_method = st.radio(
-            "Battery Selection Method:",
-            options=["By Capacity", "By Specific Model"],
-            index=0,
-            key="v2_main_battery_selection_method",
-            help="Choose how to select battery specifications",
-            horizontal=True
-        )
+        st.markdown("**Battery Selection Method:** By Specific Model")
+        st.caption("Choose specific battery model from database")
     
     with col2:
         st.metric("Available Range", f"{min_cap}-{max_cap} kWh")
     
-    # Battery selection based on method
-    if selection_method == "By Capacity":
-        # Ensure all slider values are the same type (int)
-        min_cap_int = int(min_cap)
-        max_cap_int = int(max_cap)
-        default_cap_int = int(default_cap)
+    # Battery selection by specific model only
+    # Create battery options
+    battery_options = {}
+    for battery_id, spec in battery_db.items():
+        label = f"{spec.get('company', 'Unknown')} {spec.get('model', 'Unknown')} ({spec.get('energy_kWh', 0)}kWh)"
+        battery_options[label] = {
+            'id': battery_id,
+            'spec': spec,
+            'capacity': spec.get('energy_kWh', 0)
+        }
+    
+    selected_battery_label = st.selectbox(
+        "Select Battery Model:",
+        options=list(battery_options.keys()),
+        key="v2_main_battery_model",
+        help="Choose specific battery model from database"
+    )
+    
+    if selected_battery_label:
+        selected_battery_data = battery_options[selected_battery_label]
+        active_battery_spec = selected_battery_data['spec']
+        selected_capacity = selected_battery_data['capacity']
         
-        # Capacity slider
-        selected_capacity = st.slider(
-            "Battery Capacity (kWh):",
-            min_value=min_cap_int,
-            max_value=max_cap_int,
-            value=default_cap_int,
-            step=1,
-            key="v2_main_battery_capacity",
-            help="Select desired battery capacity. Matching batteries will be shown below."
-        )
+        # Display selected battery specs
+        st.markdown("#### 📊 Selected Battery Specifications")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Energy", f"{active_battery_spec.get('energy_kWh', 0)} kWh")
+        col2.metric("Power", f"{active_battery_spec.get('power_kW', 0)} kW")
+        col3.metric("C-Rate", f"{active_battery_spec.get('c_rate', 0)}C")
+        col4.metric("Voltage", f"{active_battery_spec.get('voltage_V', 0)} V")
         
-        # Find matching batteries
-        matching_batteries = get_battery_options_for_capacity(battery_db, selected_capacity)
-        
-        if matching_batteries:
-            st.markdown(f"#### 🔍 Batteries matching {selected_capacity} kWh:")
-            
-            # Display matching batteries in a more compact format for main area
-            for i, battery_data in enumerate(matching_batteries):
-                battery = battery_data['spec']
-                with st.expander(f"🔋 {battery.get('company', 'Unknown')} {battery.get('model', 'Unknown')}", expanded=(i==0)):
-                    col1, col2, col3, col4 = st.columns(4)
-                    col1.metric("Capacity", f"{battery.get('energy_kWh', 0)} kWh")
-                    col2.metric("Power", f"{battery.get('power_kW', 0)} kW")
-                    col3.metric("C-Rate", f"{battery.get('c_rate', 0)}C")
-                    col4.metric("Voltage", f"{battery.get('voltage_V', 0)} V")
-                    
-                    # Additional details in smaller text
-                    st.caption(f"**Lifespan:** {battery.get('lifespan_years', 0)} years | **Cooling:** {battery.get('cooling', 'Unknown')}")
-            
-            # Use the first matching battery as active
-            active_battery_spec = matching_batteries[0]['spec']
-            
-        else:
-            st.warning(f"⚠️ No batteries found for {selected_capacity} kWh capacity")
-            active_battery_spec = None
-            
-    else:  # By Specific Model
-        # Create battery options
-        battery_options = {}
-        for battery_id, spec in battery_db.items():
-            label = f"{spec.get('company', 'Unknown')} {spec.get('model', 'Unknown')} ({spec.get('energy_kWh', 0)}kWh)"
-            battery_options[label] = {
-                'id': battery_id,
-                'spec': spec,
-                'capacity': spec.get('energy_kWh', 0)
-            }
-        
-        selected_battery_label = st.selectbox(
-            "Select Battery Model:",
-            options=list(battery_options.keys()),
-            key="v2_main_battery_model",
-            help="Choose specific battery model from database"
-        )
-        
-        if selected_battery_label:
-            selected_battery_data = battery_options[selected_battery_label]
-            active_battery_spec = selected_battery_data['spec']
-            selected_capacity = selected_battery_data['capacity']
-            
-            # Display selected battery specs
-            st.markdown("#### 📊 Selected Battery Specifications")
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Energy", f"{active_battery_spec.get('energy_kWh', 0)} kWh")
-            col2.metric("Power", f"{active_battery_spec.get('power_kW', 0)} kW")
-            col3.metric("C-Rate", f"{active_battery_spec.get('c_rate', 0)}C")
-            col4.metric("Voltage", f"{active_battery_spec.get('voltage_V', 0)} V")
-            
-            st.caption(f"**Company:** {active_battery_spec.get('company', 'Unknown')} | **Model:** {active_battery_spec.get('model', 'Unknown')} | **Lifespan:** {active_battery_spec.get('lifespan_years', 0)} years")
-        else:
-            active_battery_spec = None
-            selected_capacity = default_cap
+        st.caption(f"**Company:** {active_battery_spec.get('company', 'Unknown')} | **Model:** {active_battery_spec.get('model', 'Unknown')} | **Lifespan:** {active_battery_spec.get('lifespan_years', 0)} years")
+    else:
+        active_battery_spec = None
+        selected_capacity = default_cap
     
     # Analysis configuration
     st.markdown("#### ⚙️ Analysis Configuration")
@@ -1133,7 +1083,7 @@ def _render_v2_battery_controls():
     
     # Return the selected battery configuration
     battery_config = {
-        'selection_method': selection_method,
+        'selection_method': 'By Specific Model',
         'selected_capacity': selected_capacity if 'selected_capacity' in locals() else default_cap,
         'active_battery_spec': active_battery_spec,
         'run_analysis': run_analysis
@@ -1419,17 +1369,22 @@ def render_md_shaving_v2():
                             if peak_events and len(peak_events) > 0:
                                 st.success(f"✅ Detected {len(peak_events)} peak events")
                                 
-                                # Display peak events summary with correct field mapping
+                                # Display peak events summary with original detailed columns
                                 events_summary = []
                                 for i, event in enumerate(peak_events):
                                     events_summary.append({
-                                        "Event #": i + 1,
                                         "Start Date": event.get('Start Date', 'N/A'),
                                         "Start Time": event.get('Start Time', 'N/A'),
-                                        "Peak kW": f"{event.get('General Peak Load (kW)', 0):.2f}",
-                                        "Target kW": f"{avg_target:.2f}",
-                                        "Excess kW": f"{event.get('General Excess (kW)', 0):.2f}",
-                                        "Duration (min)": f"{event.get('Duration (min)', 0):.0f}",
+                                        "End Date": event.get('End Date', 'N/A'),
+                                        "End Time": event.get('End Time', 'N/A'),
+                                        "General Peak Load (kW)": f"{event.get('General Peak Load (kW)', 0):.2f}",
+                                        "General Excess (kW)": f"{event.get('General Excess (kW)', 0):.2f}",
+                                        "TOU Peak Load (kW)": f"{event.get('TOU Peak Load (kW)', 0):.2f}",
+                                        "TOU Excess (kW)": f"{event.get('TOU Excess (kW)', 0):.2f}",
+                                        "TOU Peak Time": event.get('TOU Peak Time', 'N/A'),
+                                        "Duration (min)": f"{event.get('Duration (min)', 0):.1f}",
+                                        "General Required Energy (kWh)": f"{event.get('General Required Energy (kWh)', 0):.2f}",
+                                        "TOU Required Energy (kWh)": f"{event.get('TOU Required Energy (kWh)', 0):.2f}",
                                         "MD Cost Impact (RM)": f"{event.get('MD Cost Impact (RM)', 0):.2f}",
                                         "Tariff Type": event.get('Tariff Type', 'N/A')
                                     })
@@ -1491,6 +1446,32 @@ def render_md_shaving_v2():
                         
                     except Exception as e:
                         st.error(f"❌ Error in peak events analysis: {str(e)}")
+                    
+                    # Battery Sizing Analysis (immediately after peak events)
+                    try:
+                        if 'peak_events' in locals() and peak_events:
+                            # Calculate battery sizing requirements from peak events data
+                            max_power_shaving_required = max([event.get('General Excess (kW)', 0) for event in peak_events]) if peak_events else 0
+                            max_required_energy = max([event.get('General Required Energy (kWh)', 0) for event in peak_events]) if peak_events else 0
+                            total_md_cost = sum([event.get('MD Cost Impact (RM)', 0) for event in peak_events]) if peak_events else 0
+                            
+                            if max_power_shaving_required > 0:
+                                st.markdown("### 6.5 🔋 Battery Sizing Analysis")
+                                
+                                # Display key metrics
+                                col1, col2, col3 = st.columns(3)
+                                with col1:
+                                    st.metric("Total Months", len(set([event.get('Start Date', '') for event in peak_events])))
+                                with col2:
+                                    st.metric("Max Monthly MD Excess", f"{max_power_shaving_required:.2f} kW")
+                                with col3:
+                                    st.metric("Max Monthly Required Energy", f"{max_required_energy:.2f} kWh")
+                                
+                                # Call the battery sizing analysis function
+                                _render_battery_sizing_analysis(max_power_shaving_required, max_required_energy, total_md_cost)
+                                
+                    except Exception as e:
+                        st.error(f"❌ Error in battery sizing analysis: {str(e)}")
                     
                     # V2 Battery Configuration
                     st.subheader("🔋 V2 Battery Configuration")
