@@ -94,6 +94,123 @@ def _get_dynamic_interval_hours(df_or_index):
         return _infer_interval_hours(df_or_index, fallback=0.25)
 
 
+def infer_base_interval(series):
+    """
+    Infer the base interval of the input series using native timestamp frequency.
+    
+    Args:
+        series: pd.Series or pd.DataFrame with datetime index
+        
+    Returns:
+        pd.Timedelta: Base interval of the series
+        
+    Raises:
+        ValueError: If interval is irregular or outside valid range (1-60 minutes)
+    """
+    import numpy as np
+    
+    # Get the datetime index
+    if hasattr(series, 'index'):
+        dt_index = series.index
+    else:
+        dt_index = series
+        
+    if len(dt_index) < 2:
+        raise ValueError("Need at least 2 timestamps to infer interval")
+    
+    try:
+        # Try pandas infer_freq first
+        inferred_freq = pd.infer_freq(dt_index)
+        if inferred_freq and inferred_freq != 'T':  # 'T' is sometimes problematic
+            try:
+                base_interval = pd.Timedelta(inferred_freq)
+            except (ValueError, TypeError):
+                inferred_freq = None
+        else:
+            inferred_freq = None
+            
+        if not inferred_freq:
+            # Fallback: median of timestamp differences
+            diffs = np.diff(dt_index.values).astype('timedelta64[s]')
+            median_seconds = np.median(diffs.astype(float))
+            base_interval = pd.Timedelta(seconds=median_seconds)
+        
+        # Validate interval is between 1 minute and 60 minutes
+        min_interval = pd.Timedelta(minutes=1)
+        max_interval = pd.Timedelta(minutes=60)
+        
+        if base_interval < min_interval or base_interval > max_interval:
+            raise ValueError(
+                f"Base interval {base_interval} is outside valid range (1-60 minutes). "
+                f"Please ensure your data has regular intervals between 1 minute and 1 hour."
+            )
+            
+        return base_interval
+        
+    except Exception as e:
+        # Check for irregular intervals
+        if len(dt_index) > 2:
+            diffs = np.diff(dt_index.values).astype('timedelta64[s]')
+            diff_std = np.std(diffs.astype(float))
+            diff_mean = np.mean(diffs.astype(float))
+            
+            if diff_std > diff_mean * 0.1:  # More than 10% variation
+                raise ValueError(
+                    f"Irregular time intervals detected (std/mean ratio: {diff_std/diff_mean:.2f}). "
+                    f"ROC forecasting requires regular time intervals. "
+                    f"Consider resampling your data to a fixed frequency."
+                )
+        
+        raise ValueError(f"Could not infer base interval: {str(e)}")
+
+
+def generate_forecast_horizons(base_interval):
+    """
+    Generate forecast horizons based on the base interval of the input series.
+    
+    Rules:
+    - If base ≤ 5min, use multipliers [1, 10, 30]  
+    - If base > 5min, use multipliers [1, 2, 3, 4]
+    
+    Args:
+        base_interval: pd.Timedelta representing the base interval
+        
+    Returns:
+        list: List of pd.Timedelta objects representing forecast horizons
+    """
+    # Convert to minutes for comparison
+    base_minutes = base_interval.total_seconds() / 60
+    
+    if base_minutes <= 5:
+        multipliers = [1, 10, 30]
+    else:
+        multipliers = [1, 2, 3, 4]
+    
+    # Generate horizons as Timedelta objects
+    horizons = [base_interval * multiplier for multiplier in multipliers]
+    
+    return horizons
+
+
+def get_adaptive_forecast_horizons(series):
+    """
+    Convenience function to infer base interval and generate appropriate horizons.
+    
+    Args:
+        series: pd.Series or pd.DataFrame with datetime index
+        
+    Returns:
+        tuple: (base_interval, horizons_list, horizons_minutes_list)
+    """
+    base_interval = infer_base_interval(series)
+    horizons = generate_forecast_horizons(base_interval)
+    
+    # Also return horizon values in minutes for backwards compatibility
+    horizons_minutes = [int(h.total_seconds() / 60) for h in horizons]
+    
+    return base_interval, horizons, horizons_minutes
+
+
 def _calculate_tariff_specific_monthly_peaks(df, power_col, selected_tariff, holidays):
     """
     Calculate monthly peak demands based on tariff type:
@@ -2227,15 +2344,36 @@ def render_md_shaving_v2():
                                         if selected_method == "Rate of Change (ROC)":
                                             st.markdown("#### 🔧 ROC Forecasting Configuration")
                                             
+                                            # Infer adaptive horizons based on data interval
+                                            try:
+                                                base_interval, adaptive_horizons, horizons_minutes = get_adaptive_forecast_horizons(df_processed)
+                                                
+                                                st.info(f"""
+                                                📊 **Auto-detected Data Characteristics:**
+                                                - Base Interval: {base_interval} 
+                                                - Recommended Horizons: {[f'{h}' for h in adaptive_horizons]}
+                                                - Available Horizons (minutes): {horizons_minutes}
+                                                """)
+                                                
+                                            except Exception as e:
+                                                st.error(f"❌ Error detecting data interval: {str(e)}")
+                                                # Fallback to default horizons
+                                                horizons_minutes = [1, 5, 10]
+                                                st.warning("Using fallback horizons: [1, 5, 10] minutes")
+                                            
                                             # Configuration controls
                                             col1, col2 = st.columns(2)
                                             
                                             with col1:
+                                                # Use adaptive horizons or fallback
+                                                available_options = horizons_minutes if 'horizons_minutes' in locals() else [1, 5, 10, 15, 20, 30]
+                                                default_selection = horizons_minutes[:2] if 'horizons_minutes' in locals() else [1, 10]
+                                                
                                                 horizons = st.multiselect(
                                                     "Forecast Horizons (minutes)",
-                                                    options=[1, 5, 10, 15, 20, 30],
-                                                    default=[1, 10],
-                                                    help="Select forecast horizons for backtesting analysis"
+                                                    options=available_options,
+                                                    default=default_selection,
+                                                    help="Horizons auto-generated based on your data's native interval"
                                                 )
                                             
                                             with col2:
