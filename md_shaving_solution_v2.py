@@ -2423,10 +2423,10 @@ error_10min = forecast_10min - actual_value
                                                                                 st.markdown("📅 **Date Range Selection**")
                                                                                 date_range = st.date_input(
                                                                                     "Select date range",
-                                                                                    value=(min_date, max_date),
+                                                                                    value=(min_date, min_date),
                                                                                     min_value=min_date,
                                                                                     max_value=max_date,
-                                                                                    help="Select start and end dates for analysis"
+                                                                                    help="Select start and end dates for analysis (defaults to single day)"
                                                                                 )
                                                                         
                                                                         # Filter data based on selections
@@ -2460,6 +2460,71 @@ error_10min = forecast_10min - actual_value
                                                                                 # Show filtered table
                                                                                 st.dataframe(display_df.head(20), use_container_width=True, height=300)
                                                                                 st.caption(f"Showing first 20 of {len(filtered_df)} records for {int(selected_horizon)}-minute horizon")
+                                                                                
+                                                                                # ROC Calculation Validation Table
+                                                                                with st.expander("🔍 ROC Calculation Validation (10 sample entries)", expanded=False):
+                                                                                    st.markdown(f"**Validate ROC calculations for {int(selected_horizon)}-minute horizon**")
+                                                                                    
+                                                                                    # Create ROC validation table with step-by-step calculations
+                                                                                    if len(filtered_df) > 0:
+                                                                                        validation_df = filtered_df.head(10).copy()
+                                                                                        
+                                                                                        # Calculate ROC step by step for validation display
+                                                                                        if 't' in validation_df.columns and 'actual' in validation_df.columns:
+                                                                                            validation_display = []
+                                                                                            
+                                                                                            # Sort by timestamp to ensure proper order for ROC calculation
+                                                                                            validation_df = validation_df.sort_values('t')
+                                                                                            
+                                                                                            for i, (idx, row) in enumerate(validation_df.iterrows()):
+                                                                                                timestamp = row['t']
+                                                                                                power = row.get('actual', 0)
+                                                                                                forecast = row.get('forecast_p50', 0)
+                                                                                                
+                                                                                                # Calculate Power Diff and ROC for current row
+                                                                                                if i == 0:
+                                                                                                    # First row - no previous data for diff calculation
+                                                                                                    power_diff = 0  # or NaN
+                                                                                                    roc_value = 0   # or NaN
+                                                                                                else:
+                                                                                                    # Calculate difference from previous row
+                                                                                                    prev_row = validation_df.iloc[i-1]
+                                                                                                    prev_power = prev_row.get('actual', 0)
+                                                                                                    prev_time = prev_row['t']
+                                                                                                    
+                                                                                                    # Power difference
+                                                                                                    power_diff = power - prev_power
+                                                                                                    
+                                                                                                    # Time difference in minutes
+                                                                                                    time_diff_min = (timestamp - prev_time).total_seconds() / 60
+                                                                                                    
+                                                                                                    # ROC calculation
+                                                                                                    roc_value = power_diff / time_diff_min if time_diff_min > 0 else 0
+                                                                                                
+                                                                                                validation_display.append({
+                                                                                                    'Timestamp': timestamp.strftime('%H:%M:%S'),
+                                                                                                    'Power (kW)': f"{power:.2f}",
+                                                                                                    'Power Diff (kW)': f"{power_diff:.2f}" if i > 0 else "N/A",
+                                                                                                    'ROC (kW/min)': f"{roc_value:.4f}" if i > 0 else "N/A",
+                                                                                                    'Forecast (kW)': f"{forecast:.2f}"
+                                                                                                })
+                                                                                            
+                                                                                            validation_table = pd.DataFrame(validation_display)
+                                                                                            st.dataframe(validation_table, use_container_width=True, height=350)
+                                                                                            
+                                                                                            # Add calculation methodology
+                                                                                            st.markdown("**📊 ROC Calculation Formula:**")
+                                                                                            st.markdown(f"""
+                                                                                            - **Power Diff**: Current Power - Previous Power
+                                                                                            - **ROC**: Power Diff ÷ Time Interval (minutes)
+                                                                                            - **Forecast**: Current Power + (ROC × {int(selected_horizon)} minutes)
+                                                                                            - **Formula**: P_forecast = P_current + ROC × horizon
+                                                                                            """)
+                                                                                            
+                                                                                        else:
+                                                                                            st.info("Validation data not available for selected time period")
+                                                                                    else:
+                                                                                        st.info("No data available for ROC validation")
                                                                                 
                                                                                 # Generate P90 visualization for selected horizon
                                                                                 st.markdown(f"##### 📈 {int(selected_horizon)}-Minute Forecast Visualization with P10-P90 Bands")
