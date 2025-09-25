@@ -3080,7 +3080,180 @@ error_10min = forecast_10min - actual_value
                                 
                             else:
                                 st.info("📈 **Standard Mode:** Enable forecasting to access prediction features")
+                            
+                            # =============================================================================
+                            # SHAVING STRATEGY DECISION TREE SCAFFOLDING
+                            # =============================================================================
+                            st.markdown("---")
+                            st.markdown("## 🎯 Demand Shaving Strategy Selection")
+                            
+                            # Decision tree logic based on forecasting enable/disable
+                            if enable_forecasting:
+                                st.success("🔮 **Forecast-Based Shaving:** Using P10/P50/P90 forecast data for optimization")
                                 
+                                # Retrieve stored forecast data
+                                forecast_data_available = False
+                                p10_data = None
+                                p50_data = None 
+                                p90_data = None
+                                
+                                # Check if forecast data exists in session state
+                                if 'roc_long_format' in st.session_state:
+                                    forecast_df = st.session_state['roc_long_format']
+                                    if 'forecast_p10' in forecast_df.columns and 'forecast_p50' in forecast_df.columns and 'forecast_p90' in forecast_df.columns:
+                                        forecast_data_available = True
+                                        p10_data = forecast_df[['t', 'actual', 'forecast_p10']].copy()
+                                        p50_data = forecast_df[['t', 'actual', 'forecast_p50']].copy()
+                                        p90_data = forecast_df[['t', 'actual', 'forecast_p90']].copy()
+                                        
+                                        st.info(f"📊 Forecast data loaded: {len(forecast_df):,} records with P10/P50/P90 bands")
+                                    else:
+                                        st.warning("⚠️ Forecast data exists but P10/P50/P90 columns not found")
+                                else:
+                                    st.warning("⚠️ No forecast data available - please generate forecasts first")
+                                
+                                # Store forecast data for later use
+                                if forecast_data_available:
+                                    st.session_state['shaving_forecast_data'] = {
+                                        'p10': p10_data,
+                                        'p50': p50_data,
+                                        'p90': p90_data,
+                                        'full_data': forecast_df
+                                    }
+                                
+                                # Define forecast-enabled shaving strategies (includes all 6 strategies)
+                                shaving_strategies_forecast = [
+                                    "Default Shaving",
+                                    "SOC-Aware",
+                                    "Hybrid",
+                                    "Policy A (Forecast Only)",
+                                    "Policy B (Forecast Only)", 
+                                    "Policy C (Forecast Only)"
+                                ]
+                                
+                            else:
+                                st.info("📈 **Historical Data Shaving:** Using uploaded historical data for optimization")
+                                
+                                # Use uploaded historical data
+                                historical_data_available = False
+                                historical_power_data = None
+                                
+                                # Check if uploaded data exists
+                                if uploaded_file is not None and 'df_processed' in st.session_state:
+                                    historical_df = st.session_state['df_processed']
+                                    if power_col in historical_df.columns:
+                                        historical_data_available = True
+                                        historical_power_data = historical_df[[timestamp_col, power_col]].copy()
+                                        st.info(f"📊 Historical data loaded: {len(historical_df):,} records")
+                                    else:
+                                        st.warning("⚠️ Historical data exists but power column not found")
+                                else:
+                                    st.warning("⚠️ No historical data available - please upload data first")
+                                
+                                # Store historical data for later use
+                                if historical_data_available:
+                                    st.session_state['shaving_historical_data'] = historical_power_data
+                                
+                                # Define historical-only shaving strategies (excludes forecast-only policies)
+                                shaving_strategies_forecast = [
+                                    "Default Shaving",
+                                    "SOC-Aware", 
+                                    "Hybrid"
+                                ]
+                            
+                            # Shaving Strategy Selection Dropdown
+                            st.markdown("#### 🔧 Strategy Configuration")
+                            
+                            selected_strategy = st.selectbox(
+                                "Select Shaving Strategy:",
+                                options=shaving_strategies_forecast,
+                                key="v2_shaving_strategy",
+                                help="Choose the demand shaving strategy based on your optimization goals"
+                            )
+                            
+                            # Display strategy information (no actions implemented yet)
+                            strategy_descriptions = {
+                                "Default Shaving": {
+                                    "description": "Standard peak shaving using fixed thresholds and basic battery operation",
+                                    "data_source": "Historical/Forecast",
+                                    "complexity": "Low",
+                                    "optimization": "Basic peak reduction"
+                                },
+                                "SOC-Aware": {
+                                    "description": "State-of-charge aware shaving that considers battery capacity and health",
+                                    "data_source": "Historical/Forecast", 
+                                    "complexity": "Medium",
+                                    "optimization": "Battery longevity + peak reduction"
+                                },
+                                "Hybrid": {
+                                    "description": "Combination of multiple strategies with dynamic switching based on conditions",
+                                    "data_source": "Historical/Forecast",
+                                    "complexity": "High", 
+                                    "optimization": "Multi-objective optimization"
+                                },
+                                "Policy A (Forecast Only)": {
+                                    "description": "Advanced forecast-based policy using predictive uncertainty bands",
+                                    "data_source": "Forecast Only",
+                                    "complexity": "High",
+                                    "optimization": "Uncertainty-aware peak reduction"
+                                },
+                                "Policy B (Forecast Only)": {
+                                    "description": "Risk-averse strategy using P90 forecast bounds for conservative shaving",
+                                    "data_source": "Forecast Only", 
+                                    "complexity": "High",
+                                    "optimization": "Risk-minimized peak management"
+                                },
+                                "Policy C (Forecast Only)": {
+                                    "description": "Aggressive strategy leveraging P10 forecasts for maximum peak reduction",
+                                    "data_source": "Forecast Only",
+                                    "complexity": "High", 
+                                    "optimization": "Maximum peak reduction with forecast confidence"
+                                }
+                            }
+                            
+                            if selected_strategy in strategy_descriptions:
+                                strategy_info = strategy_descriptions[selected_strategy]
+                                
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    st.markdown(f"**Description:** {strategy_info['description']}")
+                                    st.markdown(f"**Data Source:** {strategy_info['data_source']}")
+                                    
+                                with col2:
+                                    st.markdown(f"**Complexity:** {strategy_info['complexity']}")
+                                    st.markdown(f"**Optimization:** {strategy_info['optimization']}")
+                            
+                            # Strategy status and next steps
+                            st.markdown("#### 📋 Implementation Status")
+                            
+                            if enable_forecasting:
+                                if forecast_data_available:
+                                    st.success("✅ Forecast data ready for strategy implementation")
+                                    if selected_strategy in ["Policy A (Forecast Only)", "Policy B (Forecast Only)", "Policy C (Forecast Only)"]:
+                                        st.info(f"🎯 **{selected_strategy}** selected - Advanced forecast-based optimization")
+                                    else:
+                                        st.info(f"🎯 **{selected_strategy}** selected - Standard optimization with forecast enhancement")
+                                else:
+                                    st.warning("⚠️ Generate forecast data first to enable strategy implementation")
+                            else:
+                                if 'shaving_historical_data' in st.session_state:
+                                    st.success("✅ Historical data ready for strategy implementation") 
+                                    st.info(f"🎯 **{selected_strategy}** selected - Historical data optimization")
+                                else:
+                                    st.warning("⚠️ Upload historical data first to enable strategy implementation")
+                            
+                            # Placeholder for strategy implementation
+                            st.markdown("#### 🚀 Strategy Execution")
+                            st.info("🔧 **Implementation Placeholder:** Strategy-specific logic will be implemented here")
+                            
+                            # Store selected strategy for future use
+                            st.session_state['selected_shaving_strategy'] = selected_strategy
+                            st.session_state['strategy_config'] = {
+                                'strategy': selected_strategy,
+                                'forecasting_enabled': enable_forecasting,
+                                'data_available': forecast_data_available if enable_forecasting else ('shaving_historical_data' in st.session_state)
+                            }
+                            
                         else:
                             st.info("💡 Configure battery settings above to see the V2 functionality.")
                             
