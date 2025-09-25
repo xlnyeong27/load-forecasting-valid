@@ -213,12 +213,10 @@ def get_adaptive_forecast_horizons(series):
 
 def _calculate_tariff_specific_monthly_peaks(df, power_col, selected_tariff, holidays):
     """
-    Calculate monthly peak demands based on tariff type:
-    - General Tariff: Uses 24/7 peak demand (highest demand anytime)
-    - TOU Tariff: Uses peak period demand only (2PM-10PM weekdays)
+    Calculate monthly peak demands based on tariff type with NaN handling.
     
     Args:
-        df: DataFrame with power data
+        df: DataFrame with power data (may contain NaN values)
         power_col: Column name containing power values
         selected_tariff: Selected tariff configuration
         holidays: Set of holiday dates
@@ -236,34 +234,67 @@ def _calculate_tariff_specific_monthly_peaks(df, power_col, selected_tariff, hol
         if 'tou' in tariff_name or 'tou' in tariff_type_field or tariff_type_field == 'tou':
             tariff_type = 'TOU'
     
-    # Calculate monthly peaks
-    df_monthly = df.copy()
+    # ENHANCED: Validate and clean data before monthly calculations using DROP method
+    try:
+        df_clean, validation_report = validate_and_clean_data(df[power_col], power_col, fill_method='drop')
+    except Exception as e:
+        # Try to display error if streamlit is available
+        try:
+            import streamlit as st
+            st.error(f"❌ Data validation failed: {str(e)}")
+        except ImportError:
+            print(f"❌ Data validation failed: {str(e)}")
+        return pd.Series(), pd.Series(), tariff_type
+    
+    # Create working dataframe with cleaned data - CRITICAL: preserve only valid timestamps
+    valid_timestamps = df_clean.index
+    df_monthly = df.loc[valid_timestamps].copy()
+    df_monthly[power_col] = df_clean  # Use cleaned data for calculations
     df_monthly['Month'] = df_monthly.index.to_period('M')
     
-    # General peaks (24/7 maximum demand)
+    # Report data quality
+    if validation_report['nan_count'] > 0:
+        # Try to display info if streamlit is available
+        try:
+            import streamlit as st
+            st.info(f"""
+            📊 **Data Quality Report for Monthly Peaks:**
+            - **Original data points**: {validation_report['total_points']:,}
+            - **NaN/null values found**: {validation_report['nan_count']:,} ({validation_report['nan_percentage']:.1f}%)
+            - **Valid data points used**: {len(df_clean):,}
+            - **Data quality**: {validation_report['data_quality']}
+            - **Method**: Dropped NaN values to maintain data integrity
+            """)
+        except ImportError:
+            print(f"Data Quality Report: {validation_report['nan_count']} NaN values dropped from {validation_report['total_points']} total points")
+    
+    # Calculate monthly peaks with NaN-aware aggregation using cleaned data only
     monthly_general_peaks = df_monthly.groupby('Month')[power_col].max()
     
-    # TOU peaks (peak period maximum demand only - 2PM-10PM weekdays)
+    # TOU peaks calculation with enhanced NaN handling
     monthly_tou_peaks = {}
     
     for month_period in monthly_general_peaks.index:
         month_start = month_period.start_time
         month_end = month_period.end_time
-        month_mask = (df.index >= month_start) & (df.index <= month_end)
-        month_data = df[month_mask]
+        month_mask = (df_monthly.index >= month_start) & (df_monthly.index <= month_end)
+        month_data = df_monthly[month_mask]
         
         if not month_data.empty:
-            # Filter for TOU peak periods only (2PM-10PM weekdays)
+            # Filter for TOU peak periods only with valid data (no NaN values)
             tou_peak_data = []
             
             for timestamp in month_data.index:
-                if is_peak_rp4(timestamp, holidays if holidays else set()):
-                    tou_peak_data.append(month_data.loc[timestamp, power_col])
+                power_value = month_data.loc[timestamp, power_col]
+                # Only include non-NaN values during peak periods
+                if (is_peak_rp4(timestamp, holidays if holidays else set()) and 
+                    pd.notna(power_value)):
+                    tou_peak_data.append(power_value)
             
             if tou_peak_data:
                 monthly_tou_peaks[month_period] = max(tou_peak_data)
             else:
-                # If no peak period data, use general peak as fallback
+                # Use general peak as fallback (already validated non-NaN)
                 monthly_tou_peaks[month_period] = monthly_general_peaks[month_period]
         else:
             monthly_tou_peaks[month_period] = 0
@@ -718,10 +749,107 @@ def build_daily_simulator_structure(df, threshold_kw, clusters_df, selected_tari
     return days_struct
 
 
+def validate_and_clean_data(series, power_col=None, fill_method='drop'):
+    """
+    Validate and clean input data by handling NaN values and "null" strings.
+    
+    Args:
+        series: pandas Series or DataFrame with datetime index and power values
+        power_col: column name if series is a DataFrame (optional if Series)
+        fill_method: method to handle NaN values ('drop', 'interpolate', 'forward', 'backward', 'raise')
+        
+    Returns:
+        tuple: (cleaned_data, validation_report)
+        
+    Raises:
+        ValueError: If data quality is insufficient or fill_method='raise' and NaNs found
+    """
+    # Handle both Series and DataFrame inputs
+    if isinstance(series, pd.Series):
+        data = series.copy()
+        col_name = power_col or 'Power'
+    else:
+        if power_col is None:
+            # Use first numeric column if power_col not specified
+            numeric_cols = series.select_dtypes(include=[np.number]).columns
+            if len(numeric_cols) == 0:
+                raise ValueError("No numeric columns found in DataFrame")
+            power_col = numeric_cols[0]
+        data = series[power_col].copy()
+        col_name = power_col
+    
+    # Convert string "null" values to actual NaN
+    if data.dtype == 'object':
+        data = data.replace(['null', 'NULL', 'Null', 'nan', 'NaN', 'NAN', ''], np.nan)
+        # Try to convert to numeric
+        data = pd.to_numeric(data, errors='coerce')
+    
+    # Validation report
+    total_points = len(data)
+    nan_count = data.isna().sum()
+    nan_percentage = (nan_count / total_points) * 100 if total_points > 0 else 0
+    
+    validation_report = {
+        'total_points': total_points,
+        'nan_count': nan_count,
+        'nan_percentage': nan_percentage,
+        'fill_method_used': fill_method,
+        'data_quality': 'good' if nan_percentage < 5 else 'fair' if nan_percentage < 15 else 'poor'
+    }
+    
+    # Check data quality
+    if total_points < 2:
+        raise ValueError("Need at least 2 data points for analysis")
+    
+    if nan_percentage > 50:
+        raise ValueError(f"Too many missing values ({nan_percentage:.1f}%). Data quality insufficient for analysis.")
+    
+    # Handle NaN values based on fill_method - Default to 'drop' for peak/target calculations
+    if nan_count > 0:
+        if fill_method == 'raise':
+            raise ValueError(f"Found {nan_count} NaN values in {col_name} column. Clean data required.")
+        
+        elif fill_method == 'drop':
+            # Drop NaN rows completely (preserving datetime index alignment)
+            data_filled = data.dropna()
+            validation_report['points_after_drop'] = len(data_filled)
+            validation_report['fill_method_used'] = 'drop'
+            if len(data_filled) < 2:
+                raise ValueError("Insufficient data points remaining after dropping NaNs")
+        
+        elif fill_method == 'interpolate':
+            # Use linear interpolation with limit to avoid excessive extrapolation
+            data_filled = data.interpolate(method='linear', limit=5)
+            # Fill any remaining NaNs at edges with forward/backward fill
+            data_filled = data_filled.fillna(method='ffill').fillna(method='bfill')
+            validation_report['fill_method_used'] = 'interpolate + edge_fill'
+            
+        elif fill_method == 'forward':
+            data_filled = data.fillna(method='ffill')
+            
+        elif fill_method == 'backward':
+            data_filled = data.fillna(method='bfill')
+            
+        else:
+            raise ValueError(f"Unknown fill_method: {fill_method}")
+        
+        # Check if fill was successful
+        remaining_nans = data_filled.isna().sum()
+        if remaining_nans > 0 and fill_method != 'drop':
+            validation_report['remaining_nans'] = remaining_nans
+            validation_report['data_quality'] = 'poor'
+    else:
+        data_filled = data
+        validation_report['fill_method_used'] = 'none_needed'
+    
+    return data_filled, validation_report
+
+
 def _calculate_roc_from_series(series, power_col=None):
     """
     Calculate Rate of Change (ROC) in kW per minute from a pandas Series or DataFrame.
     Reuses logic from load_forecasting.py _calculate_roc function.
+    Now includes comprehensive NaN handling and data validation.
     
     Args:
         series: pandas Series with datetime index and power values, or DataFrame with power column
@@ -730,14 +858,21 @@ def _calculate_roc_from_series(series, power_col=None):
     Returns:
         pandas DataFrame with Timestamp, Power (kW), and ROC (kW/min) columns
     """
-    # Handle both Series and DataFrame inputs
+    # Validate and clean input data using DROP method for data integrity
+    try:
+        cleaned_data, validation_report = validate_and_clean_data(series, power_col, fill_method='drop')
+    except Exception as e:
+        raise ValueError(f"Data validation failed: {str(e)}")
+    
+    # Handle both Series and DataFrame inputs with cleaned data
     if isinstance(series, pd.Series):
-        df_processed = pd.DataFrame({power_col or 'Power': series})
+        df_processed = pd.DataFrame({power_col or 'Power': cleaned_data})
         power_col = power_col or 'Power'
     else:
-        df_processed = series.copy()
+        # Use only the valid timestamps from cleaned data
+        df_processed = series.loc[cleaned_data.index].copy()
+        df_processed[power_col] = cleaned_data  # Use cleaned data
         if power_col is None:
-            # Use first numeric column if power_col not specified
             numeric_cols = df_processed.select_dtypes(include=[np.number]).columns
             if len(numeric_cols) == 0:
                 raise ValueError("No numeric columns found in DataFrame")
@@ -764,6 +899,9 @@ def _calculate_roc_from_series(series, power_col=None):
         'Power (kW)': df_roc[power_col],
         'ROC (kW/min)': df_roc['roc_kw_per_min']
     })
+    
+    # Add validation report as metadata
+    roc_df._validation_report = validation_report
     
     return roc_df
 
@@ -2344,6 +2482,30 @@ def render_md_shaving_v2():
                                         if selected_method == "Rate of Change (ROC)":
                                             st.markdown("#### 🔧 ROC Forecasting Configuration")
                                             
+                                            # Validate data quality first
+                                            try:
+                                                # Check for NaN values in the power data
+                                                nan_count = df_processed[power_col].isna().sum()
+                                                total_points = len(df_processed)
+                                                nan_percentage = (nan_count / total_points) * 100 if total_points > 0 else 0
+                                                
+                                                if nan_count > 0:
+                                                    st.warning(f"""
+                                                    ⚠️ **Data Quality Notice:** 
+                                                    Found {nan_count} missing values ({nan_percentage:.1f}% of data).
+                                                    Data will be automatically cleaned using interpolation before forecasting.
+                                                    """)
+                                                    
+                                                    if nan_percentage > 20:
+                                                        st.error(f"""
+                                                        🚨 **High Missing Data Warning:** 
+                                                        {nan_percentage:.1f}% missing values may impact forecast accuracy.
+                                                        Consider reviewing your data source for quality issues.
+                                                        """)
+                                                
+                                            except Exception as e:
+                                                st.warning(f"Could not validate data quality: {str(e)}")
+                                            
                                             # Infer adaptive horizons based on data interval
                                             try:
                                                 base_interval, adaptive_horizons, horizons_minutes = get_adaptive_forecast_horizons(df_processed)
@@ -2417,6 +2579,48 @@ def render_md_shaving_v2():
                                                         
                                                         # Display summary
                                                         st.success("✅ ROC forecasting completed successfully!")
+                                                        
+                                                        # Data Quality Report
+                                                        try:
+                                                            # Get validation report from the first horizon (they all use same data)
+                                                            first_horizon = list(validation_metrics.keys())[0] if validation_metrics else None
+                                                            if first_horizon:
+                                                                # Try to get validation report from ROC calculation
+                                                                roc_df_sample = _calculate_roc_from_series(df_processed[power_col])
+                                                                if hasattr(roc_df_sample, '_validation_report'):
+                                                                    validation_report = roc_df_sample._validation_report
+                                                                    
+                                                                    with st.expander("📊 Data Quality Report", expanded=False):
+                                                                        st.markdown("**Original Data Analysis:**")
+                                                                        
+                                                                        qual_col1, qual_col2, qual_col3 = st.columns(3)
+                                                                        
+                                                                        with qual_col1:
+                                                                            st.metric("Total Data Points", validation_report['total_points'])
+                                                                            
+                                                                        with qual_col2:
+                                                                            st.metric("Missing Values", validation_report['nan_count'])
+                                                                            
+                                                                        with qual_col3:
+                                                                            quality_color = {
+                                                                                'good': '🟢',
+                                                                                'fair': '🟡', 
+                                                                                'poor': '🔴'
+                                                                            }.get(validation_report['data_quality'], '⚪')
+                                                                            st.metric("Data Quality", f"{quality_color} {validation_report['data_quality'].title()}")
+                                                                        
+                                                                        # Additional details
+                                                                        if validation_report['nan_count'] > 0:
+                                                                            st.markdown(f"""
+                                                                            **🔧 Data Cleaning Applied:**
+                                                                            - Missing Values: {validation_report['nan_count']} ({validation_report['nan_percentage']:.1f}%)
+                                                                            - Fill Method: {validation_report['fill_method_used']}
+                                                                            - Remaining Issues: {validation_report.get('remaining_nans', 0)} NaNs
+                                                                            """)
+                                                                        else:
+                                                                            st.info("✅ No missing values detected - data is clean and ready for analysis")
+                                                        except Exception as e:
+                                                            st.warning(f"Could not generate data quality report: {str(e)}")
                                                         
                                                         # Summary metrics
                                                         col1, col2, col3 = st.columns(3)
