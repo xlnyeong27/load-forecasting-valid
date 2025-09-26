@@ -1929,6 +1929,105 @@ def _render_v2_battery_controls():
     return battery_config
 
 
+def _get_soc_aware_discharge_strategy(current_soc_percent, demand_excess_kw, battery_power_kw):
+    """
+    SOC-aware conservative discharge strategy for battery management.
+    
+    Args:
+        current_soc_percent (float): Current state of charge as percentage
+        demand_excess_kw (float): Excess demand above target that needs shaving
+        battery_power_kw (float): Maximum battery discharge power
+        
+    Returns:
+        dict: Discharge strategy with power_kw and reasoning
+    """
+    # SOC-Aware Strategy Parameters (Conservative)
+    MIN_SOC_THRESHOLD = 20.0  # Keep 20% minimum charge for safety
+    EXCESS_DISCHARGE_RATE = 0.6  # Use 60% of excess for conservative approach
+    
+    # Safety check: Don't discharge below minimum SOC
+    if current_soc_percent <= MIN_SOC_THRESHOLD:
+        return {
+            'power_kw': 0,
+            'reasoning': f"SOC too low ({current_soc_percent:.1f}%) - maintaining {MIN_SOC_THRESHOLD}% minimum reserve"
+        }
+    
+    # Conservative discharge: Only use 60% of demand excess
+    conservative_demand = demand_excess_kw * EXCESS_DISCHARGE_RATE
+    
+    # Limit to battery capacity
+    discharge_power = min(conservative_demand, battery_power_kw)
+    
+    # Additional SOC-based power limiting for very low SOC
+    if current_soc_percent < 30.0:
+        # Further reduce power when approaching minimum SOC
+        soc_limiter = (current_soc_percent - MIN_SOC_THRESHOLD) / (30.0 - MIN_SOC_THRESHOLD)
+        discharge_power *= soc_limiter
+    
+    return {
+        'power_kw': discharge_power,
+        'reasoning': f"SOC-Aware: {discharge_power:.1f}kW (60% of {demand_excess_kw:.1f}kW excess, SOC: {current_soc_percent:.1f}%)"
+    }
+
+
+def _get_tariff_aware_discharge_strategy(current_soc_percent, demand_excess_kw, battery_power_kw):
+    """
+    Default tariff-aware aggressive discharge strategy for battery management.
+    
+    Args:
+        current_soc_percent (float): Current state of charge as percentage
+        demand_excess_kw (float): Excess demand above target that needs shaving
+        battery_power_kw (float): Maximum battery discharge power
+        
+    Returns:
+        dict: Discharge strategy with power_kw and reasoning
+    """
+    # Default Strategy Parameters (Aggressive)
+    MIN_SOC_THRESHOLD = 5.0   # Allow discharge to 5% for maximum shaving
+    EXCESS_DISCHARGE_RATE = 0.8  # Use 80% of excess for aggressive approach
+    
+    # Safety check: Don't discharge below minimum SOC
+    if current_soc_percent <= MIN_SOC_THRESHOLD:
+        return {
+            'power_kw': 0,
+            'reasoning': f"SOC critical ({current_soc_percent:.1f}%) - maintaining {MIN_SOC_THRESHOLD}% emergency reserve"
+        }
+    
+    # Aggressive discharge: Use 80% of demand excess
+    aggressive_demand = demand_excess_kw * EXCESS_DISCHARGE_RATE
+    
+    # Limit to battery capacity
+    discharge_power = min(aggressive_demand, battery_power_kw)
+    
+    return {
+        'power_kw': discharge_power,
+        'reasoning': f"Default: {discharge_power:.1f}kW (80% of {demand_excess_kw:.1f}kW excess, SOC: {current_soc_percent:.1f}%)"
+    }
+
+
+def _get_strategy_aware_discharge(strategy_mode, current_soc_percent, demand_excess_kw, battery_power_kw):
+    """
+    Router function to select appropriate discharge strategy based on user selection.
+    
+    Args:
+        strategy_mode (str): Either "Default Shaving" or "SOC-Aware"
+        current_soc_percent (float): Current state of charge as percentage
+        demand_excess_kw (float): Excess demand above target that needs shaving
+        battery_power_kw (float): Maximum battery discharge power
+        
+    Returns:
+        dict: Discharge strategy with power_kw, reasoning, and strategy_type
+    """
+    if strategy_mode == "SOC-Aware":
+        result = _get_soc_aware_discharge_strategy(current_soc_percent, demand_excess_kw, battery_power_kw)
+        result['strategy_type'] = 'SOC-Aware (Conservative)'
+    else:  # Default Shaving
+        result = _get_tariff_aware_discharge_strategy(current_soc_percent, demand_excess_kw, battery_power_kw)
+        result['strategy_type'] = 'Default (Aggressive)'
+    
+    return result
+
+
 def render_md_shaving_v2():
     """
     Main function to display the MD Shaving Solution V2 interface.
@@ -3255,28 +3354,87 @@ error_10min = forecast_10min - actual_value
                                 else:
                                     st.warning("⚠️ Upload historical data first to enable strategy implementation")
                             
-                            # Placeholder for strategy implementation
-                            st.markdown("#### 🚀 Strategy Execution")
-                            st.info("🔧 **Implementation Placeholder:** Strategy-specific logic will be implemented here")
-                            
-                            # Store selected strategy for future use
-                            st.session_state['selected_shaving_strategy'] = selected_strategy
-                            st.session_state['strategy_config'] = {
-                                'strategy': selected_strategy,
-                                'forecasting_enabled': enable_forecasting,
-                                'data_available': forecast_data_available if enable_forecasting else ('shaving_historical_data' in st.session_state)
-                            }
-                            
-                        else:
-                            st.info("💡 Configure battery settings above to see the V2 functionality.")
-                            
                     except Exception as e:
-                        st.error(f"❌ Error loading V2 battery controls: {str(e)}")
-                        st.info("Some V2 dependencies may not be available in this environment.")
-                
-                else:
-                    st.error("❌ Please select both timestamp and power columns to proceed.")
+                        st.error(f"❌ Error in V2 battery configuration: {str(e)}")
+                        st.info("Some V2 features may not be available in this environment.")
+                        
+                    # Strategy Implementation and Testing
+                    st.markdown("#### 🚀 Strategy Execution")
                     
+                    # Get battery configuration for strategy testing
+                    if battery_config and battery_config.get('run_analysis', False):
+                        battery_power_kw = battery_config.get('power_kw', 100)  # Default 100kW if not specified
+                        
+                        # Strategy Testing Interface
+                        st.markdown("**🔬 Test Strategy Parameters:**")
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            test_soc = st.slider("Current SOC (%)", min_value=5, max_value=100, value=50, step=5, 
+                                                help="State of charge to test strategy behavior")
+                        with col2:
+                            test_excess = st.slider("Demand Excess (kW)", min_value=0, max_value=200, value=80, step=10,
+                                                   help="Excess demand above target that needs shaving")
+                        with col3:
+                            st.metric("Battery Power", f"{battery_power_kw:.0f} kW", help="Maximum discharge power from battery config")
+                        
+                        # Strategy Comparison
+                        if st.button("🔍 Compare Strategies", help="Compare Default vs SOC-Aware strategies with current parameters"):
+                            
+                            # Test both strategies
+                            default_result = _get_strategy_aware_discharge("Default Shaving", test_soc, test_excess, battery_power_kw)
+                            soc_aware_result = _get_strategy_aware_discharge("SOC-Aware", test_soc, test_excess, battery_power_kw)
+                            
+                            st.markdown("**📊 Strategy Comparison Results:**")
+                            
+                            # Create comparison table
+                            comparison_data = {
+                                "Strategy": ["Default (Aggressive)", "SOC-Aware (Conservative)"],
+                                "Discharge Power (kW)": [f"{default_result['power_kw']:.1f}", f"{soc_aware_result['power_kw']:.1f}"],
+                                "Power Difference": ["Baseline", f"{soc_aware_result['power_kw'] - default_result['power_kw']:+.1f} kW"],
+                                "Reasoning": [default_result['reasoning'], soc_aware_result['reasoning']]
+                    }
+                    
+                            comparison_df = pd.DataFrame(comparison_data)
+                            st.dataframe(comparison_df, use_container_width=True)
+                            
+                            # Highlight selected strategy
+                            if selected_strategy == "Default Shaving":
+                                st.success(f"✅ **Selected Strategy:** {default_result['strategy_type']} - {default_result['power_kw']:.1f} kW discharge")
+                            elif selected_strategy == "SOC-Aware":
+                                st.success(f"✅ **Selected Strategy:** {soc_aware_result['strategy_type']} - {soc_aware_result['power_kw']:.1f} kW discharge")
+                            
+                            # Strategy recommendations
+                            power_diff = abs(soc_aware_result['power_kw'] - default_result['power_kw'])
+                            if power_diff > 5:  # Significant difference
+                                if test_soc < 25:
+                                    st.info("💡 **Recommendation:** SOC-Aware strategy is safer for low battery levels")
+                                elif test_excess > 100:
+                                    st.info("💡 **Recommendation:** Default strategy provides maximum peak shaving for high demand")
+                                else:
+                                    st.info("💡 **Recommendation:** Both strategies viable - choose based on priority: battery life vs. peak reduction")
+                            else:
+                                st.info("💡 **Note:** Strategies produce similar results for these parameters")
+                
+                # Current Strategy Status (outside battery config scope)
+                st.markdown("**🎯 Current Strategy Selection:**")
+                if selected_strategy == "Default Shaving":
+                    st.success("**Active:** Default (Aggressive)")
+                    st.info("**Strategy:** Uses 80% excess discharge, 5% min SOC - prioritizes maximum MD cost savings")
+                elif selected_strategy == "SOC-Aware":
+                    st.success("**Active:** SOC-Aware (Conservative)")
+                    st.info("**Strategy:** Uses 60% excess discharge, 20% min SOC - prioritizes battery longevity")
+                else:
+                    st.warning(f"**{selected_strategy}** - Advanced implementation pending")
+                    
+                    # Store selected strategy for future use
+                    st.session_state['selected_shaving_strategy'] = selected_strategy
+                    st.session_state['strategy_config'] = {
+                        'strategy': selected_strategy,
+                        'forecasting_enabled': enable_forecasting,
+                        'data_available': forecast_data_available if enable_forecasting else ('shaving_historical_data' in st.session_state)
+                    }
+            
             except Exception as e:
                 st.error(f"❌ Error configuring data inputs: {str(e)}")
                 
