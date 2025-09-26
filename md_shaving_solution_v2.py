@@ -1981,6 +1981,10 @@ def render_md_shaving_v2():
                     # Process the dataframe
                     with st.spinner("Processing data..."):
                         df_processed = _process_dataframe(df, timestamp_col)
+                        # Store processed dataframe and column names in session state for later use
+                        st.session_state['df_processed'] = df_processed
+                        st.session_state['v2_power_col'] = power_col
+                        st.session_state['v2_timestamp_col'] = timestamp_col
                     
                     st.success(f"✅ Data processed successfully! Final shape: {df_processed.shape[0]} rows")
                     
@@ -3141,9 +3145,18 @@ error_10min = forecast_10min - actual_value
                                 # Check if uploaded data exists
                                 if uploaded_file is not None and 'df_processed' in st.session_state:
                                     historical_df = st.session_state['df_processed']
-                                    if power_col in historical_df.columns:
+                                    # Get the power column name from session state or use a default
+                                    if 'v2_power_col' in st.session_state:
+                                        power_column = st.session_state['v2_power_col']
+                                    else:
+                                        # Try to find power column from available columns
+                                        power_cols = [col for col in historical_df.columns if any(kw in col.lower() for kw in ['power', 'kw', 'demand', 'load'])]
+                                        power_column = power_cols[0] if power_cols else historical_df.columns[0]
+                                    
+                                    if power_column in historical_df.columns:
                                         historical_data_available = True
-                                        historical_power_data = historical_df[[timestamp_col, power_col]].copy()
+                                        # Use the DataFrame with datetime index (no need for separate timestamp column)
+                                        historical_power_data = historical_df[[power_column]].copy()
                                         st.info(f"📊 Historical data loaded: {len(historical_df):,} records")
                                     else:
                                         st.warning("⚠️ Historical data exists but power column not found")
