@@ -9666,10 +9666,13 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
         soc_percent[i] = (soc[i] / usable_capacity) * 100
     
     # Add results to dataframe
-    df_sim['Battery_Power'] = battery_power
-    df_sim['SOC_kWh'] = soc
-    df_sim['SOC_Percent'] = soc_percent
-    df_sim['Net_Demand'] = net_demand
+    df_sim['Battery_Power_kW'] = battery_power
+    df_sim['Battery_SOC_kWh'] = soc
+    df_sim['Battery_SOC_Percent'] = soc_percent
+    df_sim['Net_Demand_kW'] = net_demand
+    
+    # Add shaving success classification for chart compatibility
+    df_sim['Shaving_Success'] = df_sim.apply(lambda row: _get_enhanced_shaving_success(row, holidays), axis=1)
     
     # Calculate metrics
     total_discharge = sum([p * interval_hours for p in battery_power if p > 0])
@@ -9679,8 +9682,8 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
         'df_sim': df_sim,
         'total_discharge_kwh': total_discharge,
         'total_charge_kwh': total_charge,
-        'peak_reduction_kw': df_sim['Original_Demand'].max() - df_sim['Net_Demand'].max(),
-        'avg_soc_percent': df_sim['SOC_Percent'].mean()
+        'peak_reduction_kw': df_sim['Original_Demand'].max() - df_sim['Net_Demand_kW'].max(),
+        'avg_soc_percent': df_sim['Battery_SOC_Percent'].mean()
     }
 
 
