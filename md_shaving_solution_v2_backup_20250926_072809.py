@@ -44,6 +44,83 @@ from tariffs.peak_logic import (
 )
 
 
+def has_selected_battery():
+    """
+    Centralized helper function to check if a valid battery is selected.
+    Returns True if either V2 battery configuration or tabled analysis battery is properly selected.
+    """
+    battery_data = get_selected_battery_data()
+    if not battery_data:
+        return False
+    
+    # Check if battery data is valid and has required fields
+    if isinstance(battery_data, dict):
+        # For tabled analysis selection, check for complete spec
+        if battery_data.get('source') != 'v2_config':
+            return (battery_data.get('is_valid', False) and 
+                    'spec' in battery_data and 
+                    battery_data['spec'] is not None)
+        
+        # For V2 configuration, check basic requirements
+        else:
+            return (battery_data.get('quantity', 0) > 0 and 
+                    battery_data.get('model') is not None)
+    
+    return False
+
+
+def get_selected_battery_data():
+    """
+    Get the currently selected battery data from session state.
+    Returns None if no valid battery is selected.
+    """
+    # Try tabled analysis selection first (preferred)
+    if ('tabled_analysis_selected_battery' in st.session_state and 
+        st.session_state.tabled_analysis_selected_battery and
+        isinstance(st.session_state.tabled_analysis_selected_battery, dict) and
+        'spec' in st.session_state.tabled_analysis_selected_battery and
+        st.session_state.tabled_analysis_selected_battery.get('is_valid', True)):
+        return st.session_state.tabled_analysis_selected_battery
+    
+    # Try V2 configuration as fallback
+    if ('v2_main_battery_model' in st.session_state and 
+        st.session_state.v2_main_battery_model and 
+        'battery_quantity' in st.session_state and
+        st.session_state.battery_quantity > 0):
+        
+        # Load battery database to get full spec for V2 selection
+        try:
+            from md_shaving_solution import load_vendor_battery_database
+            battery_db = load_vendor_battery_database()
+            
+            # Find the matching battery spec
+            selected_model = st.session_state.v2_main_battery_model
+            for battery_info in battery_db:
+                if battery_info.get('model') == selected_model:
+                    return {
+                        'id': battery_info.get('id'),
+                        'spec': battery_info,
+                        'capacity_kwh': battery_info.get('energy_kWh', 0),
+                        'power_kw': battery_info.get('power_kW', 0),
+                        'model': selected_model,
+                        'label': selected_model,
+                        'quantity': st.session_state.battery_quantity,
+                        'source': 'v2_config',
+                        'is_valid': True
+                    }
+        except Exception as e:
+            # Fallback format if database lookup fails
+            return {
+                'model': st.session_state.v2_main_battery_model,
+                'quantity': st.session_state.battery_quantity,
+                'source': 'v2_config',
+                'is_valid': False,  # Mark as potentially incomplete
+                'error': str(e)
+            }
+    
+    return None
+
+
 def _infer_interval_hours(datetime_index, fallback=0.25):
     """
     Infer sampling interval from datetime index using mode of timestamp differences.
@@ -82,7 +159,7 @@ def _get_dynamic_interval_hours(df_or_index):
     # First try to get from session state (already detected and stored)
     try:
         import streamlit as st
-        if hasattr(st.session_state, 'data_interval_hours'):
+        if 'data_interval_hours' in st.session_state:
             return st.session_state.data_interval_hours
     except (ImportError, AttributeError):
         pass
@@ -1336,6 +1413,14 @@ def _render_battery_selection_dropdown():
             
             # Display selected battery information
             if selected_battery_label != "-- Select a Battery --":
+                # Validate selection exists in options
+                if selected_battery_label not in battery_options:
+                    st.error(f"❌ Invalid battery selection: {selected_battery_label}")
+                    # Clear invalid selection
+                    if 'tabled_analysis_selected_battery' in st.session_state:
+                        del st.session_state.tabled_analysis_selected_battery
+                    return None
+                
                 selected_battery_data = battery_options[selected_battery_label]
                 battery_spec = selected_battery_data['spec']
                 
@@ -1358,13 +1443,22 @@ def _render_battery_selection_dropdown():
                 st.dataframe(df_specs, use_container_width=True, hide_index=True)
                 
                 # Store selected battery in session state for use in other parts of the analysis
-                st.session_state.tabled_analysis_selected_battery = {
-                    'id': selected_battery_data['id'],
-                    'spec': battery_spec,
-                    'capacity_kwh': selected_battery_data['capacity_kwh'],
-                    'power_kw': selected_battery_data['power_kw'],
-                    'label': selected_battery_label
-                }
+                # EXPLICIT TRUTHY VALUE: Ensure we have a stable identifying field and complete data
+                if selected_battery_data and battery_spec and selected_battery_label:
+                    st.session_state.tabled_analysis_selected_battery = {
+                        'id': selected_battery_data['id'],
+                        'spec': battery_spec,
+                        'capacity_kwh': selected_battery_data['capacity_kwh'],
+                        'power_kw': selected_battery_data['power_kw'],
+                        'label': selected_battery_label,
+                        'model': selected_battery_data.get('model', selected_battery_label),  # Stable identifier
+                        'selected_at': datetime.now().isoformat(),  # Timestamp for debugging
+                        'is_valid': True  # Explicit validation flag
+                    }
+                else:
+                    # Clear invalid selections
+                    if 'tabled_analysis_selected_battery' in st.session_state:
+                        del st.session_state.tabled_analysis_selected_battery
                 
                 return selected_battery_data
             else:
@@ -1385,11 +1479,11 @@ def _render_battery_quantity_recommendation(max_power_shaving_required, recommen
     """
     st.markdown("#### 7.1 🔢 Battery Quantity Recommendation")
     
-    # Check if user has selected a battery from the tabled analysis dropdown
-    if hasattr(st.session_state, 'tabled_analysis_selected_battery') and st.session_state.tabled_analysis_selected_battery:
-        selected_battery = st.session_state.tabled_analysis_selected_battery
+    # Use standardized battery selection check
+    if has_selected_battery():
+        selected_battery = get_selected_battery_data()
         battery_spec = selected_battery['spec']
-        battery_name = selected_battery['label']
+        battery_name = selected_battery.get('label', selected_battery.get('model', 'Selected Battery'))
         
         # Extract battery specifications
         battery_power_kw = battery_spec.get('power_kW', 0)
@@ -1518,11 +1612,45 @@ def _render_battery_sizing_analysis(max_power_shaving_required, recommended_ener
     """
     st.markdown("#### 7.2 🔋 Battery Sizing & Financial Analysis")
     
-    # Check if user has selected a battery from the tabled analysis dropdown
-    if hasattr(st.session_state, 'tabled_analysis_selected_battery') and st.session_state.tabled_analysis_selected_battery:
-        selected_battery = st.session_state.tabled_analysis_selected_battery
+    # Check if user has selected a battery from either the tabled analysis dropdown OR the V2 main configuration
+    selected_battery = None
+    battery_spec = None
+    battery_name = None
+    bess_quantity = 1
+    
+    # First check V2 main battery configuration (priority since this is the V2 interface)
+    if ('v2_main_battery_model' in st.session_state and 
+        st.session_state.v2_main_battery_model and 
+        'battery_quantity' in st.session_state):
+        
+        # Load battery database to get specs
+        battery_db = load_vendor_battery_database()
+        if battery_db:
+            # Create battery options to find the selected one
+            battery_options = {}
+            for battery_id, spec in battery_db.items():
+                label = f"{spec.get('company', 'Unknown')} {spec.get('model', 'Unknown')} ({spec.get('energy_kWh', 0)}kWh)"
+                battery_options[label] = {
+                    'id': battery_id,
+                    'spec': spec,
+                    'capacity': spec.get('energy_kWh', 0)
+                }
+            
+            selected_battery_label = st.session_state.v2_main_battery_model
+            if selected_battery_label in battery_options:
+                selected_battery_data = battery_options[selected_battery_label]
+                battery_spec = selected_battery_data['spec']
+                battery_name = selected_battery_label
+                bess_quantity = st.session_state.battery_quantity
+    
+    # Fallback to tabled analysis selection if V2 selection not available  
+    elif has_selected_battery():
+        selected_battery = get_selected_battery_data()
         battery_spec = selected_battery['spec']
-        battery_name = selected_battery['label']
+        battery_name = selected_battery.get('label', selected_battery.get('model', 'Selected Battery'))
+        bess_quantity = getattr(st.session_state, 'tabled_analysis_battery_quantity', 1)
+    
+    if battery_spec and battery_name:
         
         st.info(f"🔋 **Analysis based on selected battery:** {battery_name}")
         
@@ -1532,8 +1660,7 @@ def _render_battery_sizing_analysis(max_power_shaving_required, recommended_ener
         battery_lifespan_years = battery_spec.get('lifespan_years', 15)
         
         if battery_power_kw > 0 and battery_energy_kwh > 0:
-            # Use the user-selected quantity from the quantity recommendation section
-            bess_quantity = getattr(st.session_state, 'tabled_analysis_battery_quantity', 1)
+            # Use the quantity determined above (either from V2 or tabled analysis)
             
             # Calculate quantities that would be needed (for reference only)
             qty_for_power = max_power_shaving_required / battery_power_kw if battery_power_kw > 0 else 0
@@ -1929,103 +2056,430 @@ def _render_v2_battery_controls():
     return battery_config
 
 
-def _get_soc_aware_discharge_strategy(current_soc_percent, demand_excess_kw, battery_power_kw):
+def _create_v2_dynamic_target_series(simulation_index, monthly_targets):
     """
-    SOC-aware conservative discharge strategy for battery management.
+    Create a dynamic target series that matches the simulation dataframe index
+    with stepped monthly targets from V2's monthly_targets.
+    """
+    target_series = pd.Series(index=simulation_index, dtype=float)
+    
+    for timestamp in simulation_index:
+        # Get the month period for this timestamp
+        month_period = timestamp.to_period('M')
+        
+        # Find the corresponding monthly target
+        if month_period in monthly_targets.index:
+            target_series.loc[timestamp] = monthly_targets.loc[month_period]
+        else:
+            # Fallback: use the closest available monthly target
+            available_months = list(monthly_targets.index)
+            if available_months:
+                # Find the closest month
+                closest_month = min(available_months, 
+                                  key=lambda m: abs((timestamp.to_period('M') - m).n))
+                target_series.loc[timestamp] = monthly_targets.loc[closest_month]
+            else:
+                # Ultimate fallback
+                target_series.loc[timestamp] = 1000.0  # Safe default
+    
+    return target_series
+
+
+def is_md_window(timestamp, holidays=None):
+    """
+    Check if timestamp is within MD recording window (2PM-10PM weekdays, excluding holidays)
+    """
+    if timestamp.weekday() >= 5:  # Weekend
+        return False
+    if holidays and timestamp.date() in holidays:  # Holiday
+        return False
+    if not (14 <= timestamp.hour < 22):  # Outside 2PM-10PM
+        return False
+    return True
+
+
+def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizing, battery_params, interval_hours, selected_tariff=None, holidays=None):
+    """
+    V2-specific battery simulation that ensures Net Demand NEVER goes below monthly targets.
+    
+    Key V2 Innovation: Monthly targets act as FLOOR values for Net Demand.
+    - Net Demand must stay ABOVE or EQUAL to the monthly target at all times
+    - Battery discharge is limited to keep Net Demand >= Monthly Target
+    - Uses dynamic monthly targets instead of static target
+    - TOU ENHANCEMENT: Special charging precondition for TOU tariffs (95% SOC by 2PM)
     
     Args:
-        current_soc_percent (float): Current state of charge as percentage
-        demand_excess_kw (float): Excess demand above target that needs shaving
-        battery_power_kw (float): Maximum battery discharge power
+        df: Energy data DataFrame with datetime index
+        power_col: Name of power demand column
+        monthly_targets: Series with Period index containing monthly targets
+        battery_sizing: Dictionary with capacity_kwh, power_rating_kw
+        battery_params: Dictionary with efficiency, depth_of_discharge
+        interval_hours: Time interval in hours (e.g., 0.25 for 15-min)
+        selected_tariff: Tariff configuration
+        holidays: Set of holiday dates
         
     Returns:
-        dict: Discharge strategy with power_kw and reasoning
+        Dictionary with simulation results and V2-specific metrics
     """
-    # SOC-Aware Strategy Parameters (Conservative)
-    MIN_SOC_THRESHOLD = 20.0  # Keep 20% minimum charge for safety
-    EXCESS_DISCHARGE_RATE = 0.6  # Use 60% of excess for conservative approach
+    # Create simulation dataframe
+    df_sim = df[[power_col]].copy()
+    df_sim['Original_Demand'] = df_sim[power_col]
     
-    # Safety check: Don't discharge below minimum SOC
-    if current_soc_percent <= MIN_SOC_THRESHOLD:
-        return {
-            'power_kw': 0,
-            'reasoning': f"SOC too low ({current_soc_percent:.1f}%) - maintaining {MIN_SOC_THRESHOLD}% minimum reserve"
-        }
+    # V2 ENHANCEMENT: Create dynamic monthly target series for each timestamp
+    target_series = _create_v2_dynamic_target_series(df_sim.index, monthly_targets)
+    df_sim['Monthly_Target'] = target_series
+    df_sim['Excess_Demand'] = (df_sim[power_col] - df_sim['Monthly_Target']).clip(lower=0)
     
-    # Conservative discharge: Only use 60% of demand excess
-    conservative_demand = demand_excess_kw * EXCESS_DISCHARGE_RATE
+    # Battery state variables
+    battery_capacity = battery_sizing['capacity_kwh']
+    usable_capacity = battery_capacity * (battery_params.get('depth_of_discharge', 80) / 100)
+    max_power = battery_sizing['power_rating_kw']
+    efficiency = battery_params.get('round_trip_efficiency', 95) / 100
     
-    # Limit to battery capacity
-    discharge_power = min(conservative_demand, battery_power_kw)
+    # Initialize battery state
+    soc = np.zeros(len(df_sim))  # State of Charge in kWh
+    soc_percent = np.zeros(len(df_sim))  # SOC as percentage
+    battery_power = np.zeros(len(df_sim))  # Positive = discharge, Negative = charge
+    net_demand = df_sim[power_col].copy()
     
-    # Additional SOC-based power limiting for very low SOC
-    if current_soc_percent < 30.0:
-        # Further reduce power when approaching minimum SOC
-        soc_limiter = (current_soc_percent - MIN_SOC_THRESHOLD) / (30.0 - MIN_SOC_THRESHOLD)
-        discharge_power *= soc_limiter
+    # V2 SIMULATION LOOP - Monthly Target Floor Implementation
+    for i in range(len(df_sim)):
+        current_demand = df_sim[power_col].iloc[i]
+        monthly_target = df_sim['Monthly_Target'].iloc[i]
+        excess = max(0, current_demand - monthly_target)
+        current_timestamp = df_sim.index[i]
+        
+        # Determine if discharge is allowed based on tariff type
+        should_discharge = excess > 0
+        
+        if selected_tariff and should_discharge:
+            # Apply TOU logic for discharge decisions
+            tariff_type = selected_tariff.get('Type', '').lower()
+            tariff_name = selected_tariff.get('Tariff', '').lower()
+            is_tou_tariff = tariff_type == 'tou' or 'tou' in tariff_name
+            
+            if is_tou_tariff:
+                # TOU tariffs: Only discharge during MD windows (2PM-10PM weekdays)
+                should_discharge = (excess > 0) and is_md_window(current_timestamp, holidays)
+            # For General tariffs, discharge anytime above target (24/7 MD recording)
+        
+        if should_discharge:  # V2 ENHANCED DISCHARGE LOGIC - Monthly Target Floor
+            # V2 CRITICAL CONSTRAINT: Calculate maximum discharge that keeps Net Demand >= Monthly Target
+            max_allowable_discharge = current_demand - monthly_target
+            
+            # Get current SOC
+            current_soc_kwh = soc[i-1] if i > 0 else usable_capacity * 0.80  # Start at 80% SOC
+            current_soc_percent = (current_soc_kwh / usable_capacity) * 100
+            
+            # Calculate required discharge power with constraints
+            required_discharge = min(
+                max_allowable_discharge,  # MD target constraint
+                max_power  # Battery power rating
+            )
+            
+            # Check if battery has enough energy (with 5% minimum SOC safety protection)
+            available_energy = current_soc_kwh
+            min_soc_energy = usable_capacity * 0.05  # 5% minimum safety SOC
+            max_discharge_energy = max(0, available_energy - min_soc_energy)
+            max_discharge_power = min(max_discharge_energy / interval_hours, required_discharge)
+            
+            actual_discharge = max(0, max_discharge_power)
+            battery_power[i] = actual_discharge
+            soc[i] = current_soc_kwh - actual_discharge * interval_hours
+            
+            # V2 GUARANTEE: Net Demand = Original Demand - Discharge, but NEVER below Monthly Target
+            net_demand_candidate = current_demand - actual_discharge
+            net_demand.iloc[i] = max(net_demand_candidate, monthly_target)
+            
+        else:  # Can charge battery if there's room and low demand
+            if i > 0:
+                soc[i] = soc[i-1]
+            else:
+                soc[i] = usable_capacity * 0.8
+                
+            net_demand.iloc[i] = current_demand
+        
+        # Ensure SOC stays within 5%-95% limits
+        soc[i] = max(usable_capacity * 0.05, min(soc[i], usable_capacity * 0.95))
+        soc_percent[i] = (soc[i] / usable_capacity) * 100
+    
+    # Add V2 simulation results to dataframe
+    df_sim['Battery_Power_kW'] = battery_power
+    df_sim['Battery_SOC_kWh'] = soc
+    df_sim['Battery_SOC_Percent'] = soc_percent
+    df_sim['Net_Demand_kW'] = net_demand
+    df_sim['Peak_Shaved'] = df_sim['Original_Demand'] - df_sim['Net_Demand_kW']
+    
+    # Calculate performance metrics
+    total_energy_discharged = sum([p * interval_hours for p in battery_power if p > 0])
+    peak_reduction = df_sim['Original_Demand'].max() - df_sim['Net_Demand_kW'].max()
     
     return {
-        'power_kw': discharge_power,
-        'reasoning': f"SOC-Aware: {discharge_power:.1f}kW (60% of {demand_excess_kw:.1f}kW excess, SOC: {current_soc_percent:.1f}%)"
+        'df_simulation': df_sim,
+        'total_energy_discharged': total_energy_discharged,
+        'peak_reduction_kw': peak_reduction,
+        'success_rate_percent': 85.0,  # Placeholder
+        'average_soc': np.mean(soc_percent),
+        'min_soc': np.min(soc_percent),
+        'max_soc': np.max(soc_percent)
     }
 
 
-def _get_tariff_aware_discharge_strategy(current_soc_percent, demand_excess_kw, battery_power_kw):
+def implement_basic_shave_strategy(df_processed, power_col, strategy_config, battery_config, selected_tariff, holidays):
     """
-    Default tariff-aware aggressive discharge strategy for battery management.
+    Implement basic shave strategy that discharges battery when demand exceeds target.
     
     Args:
-        current_soc_percent (float): Current state of charge as percentage
-        demand_excess_kw (float): Excess demand above target that needs shaving
-        battery_power_kw (float): Maximum battery discharge power
+        df_processed: Processed dataframe with power data
+        power_col: Power column name
+        strategy_config: Strategy configuration from session state
+        battery_config: Battery configuration from session state
+        selected_tariff: Selected tariff configuration
+        holidays: Set of holiday dates
         
     Returns:
-        dict: Discharge strategy with power_kw and reasoning
+        dict: Strategy execution results
     """
-    # Default Strategy Parameters (Aggressive)
-    MIN_SOC_THRESHOLD = 5.0   # Allow discharge to 5% for maximum shaving
-    EXCESS_DISCHARGE_RATE = 0.8  # Use 80% of excess for aggressive approach
-    
-    # Safety check: Don't discharge below minimum SOC
-    if current_soc_percent <= MIN_SOC_THRESHOLD:
+    try:
+        st.info("🔋 **Executing Basic Shave Strategy**: Discharging battery when demand exceeds monthly targets")
+        
+        # Get monthly targets (calculate if not available)
+        if 'v2_monthly_targets' in st.session_state:
+            monthly_targets = st.session_state['v2_monthly_targets']
+        else:
+            # Calculate monthly targets on the fly
+            monthly_targets, _, _, _ = _calculate_monthly_targets_v2(
+                df_processed, power_col, selected_tariff, holidays,
+                "Percentage to Shave", 10, None, None  # Default 10% shaving
+            )
+            st.session_state['v2_monthly_targets'] = monthly_targets
+        
+        # 6) PREFLIGHT CHECK: Normalize local vs session variables
+        if 'df_processed' not in st.session_state:
+            st.error("❌ df_processed not found in session state")
+            return {'status': 'error', 'message': 'Missing processed data'}
+        
+        if not has_selected_battery():
+            st.error("❌ No valid battery selection found")
+            return {'status': 'error', 'message': 'No battery selected'}
+        
+        # Get battery data using standardized helper
+        battery_data = get_selected_battery_data()
+        if not battery_data:
+            st.error("❌ Could not retrieve battery data")
+            return {'status': 'error', 'message': 'Invalid battery data'}
+        
+        battery_spec = None
+        quantity = 1
+        battery_source = None
+        
+        # Use standardized battery data from helper function
+        if battery_data.get('source') != 'v2_config':  # Tabled analysis selection
+            try:
+                if isinstance(battery_data, dict) and 'spec' in battery_data:
+                    battery_spec = battery_data['spec']
+                    quantity = battery_data.get('quantity', 1)
+                    battery_source = "Tabled Analysis"
+                    st.success(f"✅ Battery from {battery_source}: {battery_data.get('label', 'Unknown')}")
+                else:
+                    st.warning(f"⚠️ Invalid tabled_analysis_selected_battery format: {type(battery_data)}")
+            except Exception as e:
+                st.warning(f"⚠️ Error accessing tabled_analysis_selected_battery: {str(e)}")
+        
+        # Method 2: Fallback to V2 main battery configuration
+        elif ('v2_main_battery_model' in st.session_state and 
+              st.session_state.v2_main_battery_model and 
+              'battery_quantity' in st.session_state):
+            
+            try:
+                # Load battery database to get specs
+                battery_db = load_vendor_battery_database()
+                
+                # Find matching battery
+                selected_model = st.session_state.v2_main_battery_model
+                matching_batteries = [b for b in battery_db if b.get('model') == selected_model]
+                
+                if matching_batteries:
+                    battery_spec = matching_batteries[0]  # Use first match
+                    quantity = st.session_state.battery_quantity
+                    battery_source = "V2 Configuration"
+                    st.success(f"✅ Battery from {battery_source}: {selected_model} (Qty: {quantity})")
+                else:
+                    st.warning(f"⚠️ V2 battery model '{selected_model}' not found in database")
+            except Exception as e:
+                st.warning(f"⚠️ Error accessing V2 battery configuration: {str(e)}")
+        
+        else:
+            st.error("❌ No valid battery configuration found")
+            st.warning("Please select a battery from either:")
+            st.warning("- Tabled Analysis section, OR")
+            st.warning("- V2 Battery Configuration section")
+            return {'status': 'error', 'message': 'No battery configuration'}
+        
+        # Configure battery sizing based on available specs
+        if battery_spec and battery_source:
+            battery_sizing = {
+                'capacity_kwh': battery_spec.get('energy_kWh', 0) * quantity,
+                'power_rating_kw': battery_spec.get('power_kW', 0) * quantity
+            }
+            
+            battery_params = {
+                'round_trip_efficiency': battery_spec.get('efficiency_%', 95),
+                'depth_of_discharge': battery_spec.get('dod_%', 80)
+            }
+            
+            st.write(f"**Battery Configuration Summary:**")
+            st.write(f"- Source: {battery_source}")
+            st.write(f"- Model: {battery_spec.get('model', 'Unknown')}")
+            st.write(f"- Quantity: {quantity}")
+            st.write(f"- Total Capacity: {battery_sizing['capacity_kwh']:.1f} kWh")
+            st.write(f"- Total Power: {battery_sizing['power_rating_kw']:.1f} kW")
+        
+        else:
+            st.error("❌ Could not configure battery sizing")
+            st.warning("Missing battery specifications or source information")
+            return {
+                'status': 'error',
+                'message': 'Invalid battery configuration - missing specs'
+            }
+        
+        # Get data interval
+        interval_hours = _get_dynamic_interval_hours(df_processed)
+        
+        # Execute battery simulation with basic shave strategy
+        with st.spinner("🔄 Running basic shave strategy simulation..."):
+            simulation_results = _simulate_battery_operation_v2(
+                df_processed, power_col, monthly_targets, 
+                battery_sizing, battery_params, interval_hours,
+                selected_tariff, holidays
+            )
+        
+        # Display results
+        if simulation_results and 'df_simulation' in simulation_results:
+            st.success("✅ Basic shave strategy simulation completed!")
+            
+            # Show performance metrics
+            st.markdown("**Strategy Performance:**")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Peak Reduction", f"{simulation_results['peak_reduction_kw']:.1f} kW")
+            with col2:
+                st.metric("Energy Discharged", f"{simulation_results['total_energy_discharged']:.1f} kWh")
+            with col3:
+                st.metric("Average SOC", f"{simulation_results['average_soc']:.1f}%")
+            
+            # Display charts
+            display_basic_shave_chart(simulation_results['df_simulation'], monthly_targets)
+            
+            return {
+                'status': 'success',
+                'results': simulation_results,
+                'battery_config': battery_sizing,
+                'battery_params': battery_params
+            }
+        else:
+            st.error("❌ Simulation failed - no results generated")
+            return {
+                'status': 'error', 
+                'message': 'Simulation returned no results'
+            }
+            
+    except Exception as e:
+        st.error(f"❌ Error executing basic shave strategy: {str(e)}")
         return {
-            'power_kw': 0,
-            'reasoning': f"SOC critical ({current_soc_percent:.1f}%) - maintaining {MIN_SOC_THRESHOLD}% emergency reserve"
+            'status': 'error',
+            'message': str(e)
         }
-    
-    # Aggressive discharge: Use 80% of demand excess
-    aggressive_demand = demand_excess_kw * EXCESS_DISCHARGE_RATE
-    
-    # Limit to battery capacity
-    discharge_power = min(aggressive_demand, battery_power_kw)
-    
-    return {
-        'power_kw': discharge_power,
-        'reasoning': f"Default: {discharge_power:.1f}kW (80% of {demand_excess_kw:.1f}kW excess, SOC: {current_soc_percent:.1f}%)"
-    }
 
 
-def _get_strategy_aware_discharge(strategy_mode, current_soc_percent, demand_excess_kw, battery_power_kw):
+def display_basic_shave_chart(df_sim, monthly_targets):
     """
-    Router function to select appropriate discharge strategy based on user selection.
-    
-    Args:
-        strategy_mode (str): Either "Default Shaving" or "SOC-Aware"
-        current_soc_percent (float): Current state of charge as percentage
-        demand_excess_kw (float): Excess demand above target that needs shaving
-        battery_power_kw (float): Maximum battery discharge power
+    Display basic chart showing battery operation and demand shaving.
+    """
+    try:
+        import plotly.graph_objects as go
         
-    Returns:
-        dict: Discharge strategy with power_kw, reasoning, and strategy_type
-    """
-    if strategy_mode == "SOC-Aware":
-        result = _get_soc_aware_discharge_strategy(current_soc_percent, demand_excess_kw, battery_power_kw)
-        result['strategy_type'] = 'SOC-Aware (Conservative)'
-    else:  # Default Shaving
-        result = _get_tariff_aware_discharge_strategy(current_soc_percent, demand_excess_kw, battery_power_kw)
-        result['strategy_type'] = 'Default (Aggressive)'
-    
-    return result
+        st.markdown("#### 📊 Basic Shave Strategy Results")
+        
+        fig = go.Figure()
+        
+        # Original demand line
+        fig.add_trace(go.Scatter(
+            x=df_sim.index,
+            y=df_sim['Original_Demand'],
+            mode='lines',
+            name='Original Demand',
+            line=dict(color='blue', width=2)
+        ))
+        
+        # Net demand after battery
+        fig.add_trace(go.Scatter(
+            x=df_sim.index,
+            y=df_sim['Net_Demand_kW'],
+            mode='lines',
+            name='Net Demand (After Battery)',
+            line=dict(color='green', width=2)
+        ))
+        
+        # Monthly targets
+        fig.add_trace(go.Scatter(
+            x=df_sim.index,
+            y=df_sim['Monthly_Target'],
+            mode='lines',
+            name='Monthly Target',
+            line=dict(color='red', width=2, dash='dash')
+        ))
+        
+        # Battery discharge
+        discharge_mask = df_sim['Battery_Power_kW'] > 0
+        if discharge_mask.any():
+            fig.add_trace(go.Scatter(
+                x=df_sim.index[discharge_mask],
+                y=df_sim['Battery_Power_kW'][discharge_mask],
+                mode='markers',
+                name='Battery Discharge',
+                marker=dict(color='orange', size=4),
+                yaxis='y2'
+            ))
+        
+        fig.update_layout(
+            title='Basic Shave Strategy: Demand vs Battery Operation',
+            xaxis_title='Time',
+            yaxis_title='Power (kW)',
+            yaxis2=dict(
+                title='Battery Power (kW)',
+                overlaying='y',
+                side='right'
+            ),
+            height=500,
+            hovermode='x unified'
+        )
+        
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # SOC chart
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(
+            x=df_sim.index,
+            y=df_sim['Battery_SOC_Percent'],
+            mode='lines',
+            name='Battery SOC',
+            line=dict(color='purple', width=2)
+        ))
+        
+        fig2.update_layout(
+            title='Battery State of Charge',
+            xaxis_title='Time',
+            yaxis_title='SOC (%)',
+            height=300
+        )
+        
+        st.plotly_chart(fig2, use_container_width=True)
+        
+    except ImportError:
+        st.warning("⚠️ Plotly not available - charts disabled")
+    except Exception as e:
+        st.error(f"❌ Error creating charts: {str(e)}")
 
 
 def render_md_shaving_v2():
@@ -2080,10 +2534,6 @@ def render_md_shaving_v2():
                     # Process the dataframe
                     with st.spinner("Processing data..."):
                         df_processed = _process_dataframe(df, timestamp_col)
-                        # Store processed dataframe and column names in session state for later use
-                        st.session_state['df_processed'] = df_processed
-                        st.session_state['v2_power_col'] = power_col
-                        st.session_state['v2_timestamp_col'] = timestamp_col
                     
                     st.success(f"✅ Data processed successfully! Final shape: {df_processed.shape[0]} rows")
                     
@@ -3241,26 +3691,68 @@ error_10min = forecast_10min - actual_value
                                 historical_data_available = False
                                 historical_power_data = None
                                 
-                                # Check if uploaded data exists
-                                if uploaded_file is not None and 'df_processed' in st.session_state:
-                                    historical_df = st.session_state['df_processed']
-                                    # Get the power column name from session state or use a default
-                                    if 'v2_power_col' in st.session_state:
-                                        power_column = st.session_state['v2_power_col']
-                                    else:
-                                        # Try to find power column from available columns
-                                        power_cols = [col for col in historical_df.columns if any(kw in col.lower() for kw in ['power', 'kw', 'demand', 'load'])]
-                                        power_column = power_cols[0] if power_cols else historical_df.columns[0]
+                                # DEBUG: Check session state and uploaded file status
+                                st.write("**🔍 Debug Information:**")
+                                st.write(f"- uploaded_file exists: {uploaded_file is not None}")
+                                st.write(f"- Session state keys: {list(st.session_state.keys())}")
+                                st.write(f"- df_processed in session: {'df_processed' in st.session_state}")
+                                if 'df_processed' in st.session_state:
+                                    df_debug = st.session_state['df_processed']
+                                    st.write(f"- df_processed type: {type(df_debug)}")
+                                    st.write(f"- df_processed shape: {df_debug.shape if hasattr(df_debug, 'shape') else 'No shape attr'}")
+                                    st.write(f"- df_processed columns: {list(df_debug.columns) if hasattr(df_debug, 'columns') else 'No columns attr'}")
+                                st.write(f"- power_col value: '{power_col}'")
+                                st.write(f"- timestamp_col value: '{timestamp_col}'")
+                                
+                                # ROBUST: Check multiple possible sources for historical data
+                                historical_data_available = False
+                                historical_power_data = None
+                                
+                                # Method 1: Check session state first
+                                if uploaded_file is not None:
+                                    if 'df_processed' in st.session_state and st.session_state['df_processed'] is not None:
+                                        historical_df = st.session_state['df_processed']
+                                        st.info(f"✅ Found df_processed with {len(historical_df):,} records")
+                                        
+                                        if power_col and power_col in historical_df.columns:
+                                            historical_data_available = True
+                                            # Use df_processed directly since it's already processed
+                                            historical_power_data = historical_df.copy()
+                                            st.success(f"✅ Historical data loaded: {len(historical_df):,} records with power column '{power_col}'")
+                                        else:
+                                            st.warning(f"⚠️ Power column '{power_col}' not found in df_processed")
+                                            st.write("Available columns:", list(historical_df.columns))
                                     
-                                    if power_column in historical_df.columns:
-                                        historical_data_available = True
-                                        # Use the DataFrame with datetime index (no need for separate timestamp column)
-                                        historical_power_data = historical_df[[power_column]].copy()
-                                        st.info(f"📊 Historical data loaded: {len(historical_df):,} records")
+                                    # Method 2: Fallback to direct variable access if available in scope
+                                    elif 'df_processed' in locals():
+                                        st.info("🔄 Using df_processed from local scope...")
+                                        historical_df = df_processed
+                                        if power_col and power_col in historical_df.columns:
+                                            historical_data_available = True
+                                            historical_power_data = historical_df.copy()
+                                            # Store in session state for future use
+                                            st.session_state['df_processed'] = historical_df
+                                            st.success(f"✅ Historical data loaded from local scope: {len(historical_df):,} records")
+                                        else:
+                                            st.warning(f"⚠️ Power column '{power_col}' not found in local df_processed")
+                                    
                                     else:
-                                        st.warning("⚠️ Historical data exists but power column not found")
+                                        st.warning("⚠️ df_processed not found in session state or local scope")
+                                        
+                                        # Method 3: Show available data sources for debugging
+                                        st.write("**Available data sources:**")
+                                        data_sources = [k for k in st.session_state.keys() if 'df' in k.lower() or 'data' in k.lower()]
+                                        if data_sources:
+                                            for source in data_sources:
+                                                source_data = st.session_state[source]
+                                                if hasattr(source_data, 'shape'):
+                                                    st.write(f"- {source}: {type(source_data)} with shape {source_data.shape}")
+                                                else:
+                                                    st.write(f"- {source}: {type(source_data)}")
+                                        else:
+                                            st.write("- No DataFrame-like objects found in session state")
                                 else:
-                                    st.warning("⚠️ No historical data available - please upload data first")
+                                    st.warning("⚠️ No file uploaded - please upload data first")
                                 
                                 # Store historical data for later use
                                 if historical_data_available:
@@ -3272,6 +3764,191 @@ error_10min = forecast_10min - actual_value
                                     "SOC-Aware", 
                                     "Hybrid"
                                 ]
+                            
+                            # =============================================================================
+                            # FORECAST DATA PROCESSING AND SHAVE REQUIREMENTS CALCULATION
+                            # =============================================================================
+                            
+                            # Process data based on forecasting mode
+                            shave_requirements_data = None
+                            
+                            if enable_forecasting:
+                                st.markdown("#### 📊 Forecast-Based Shave Requirements Analysis")
+                                
+                                if forecast_data_available and 'shaving_forecast_data' in st.session_state:
+                                    forecast_full_data = st.session_state['shaving_forecast_data']['full_data']
+                                    
+                                    # Ensure P10/P50/P90 bands are available
+                                    if all(col in forecast_full_data.columns for col in ['forecast_p10', 'forecast_p50', 'forecast_p90']):
+                                        try:
+                                            # Get monthly targets (assuming we have them from previous calculations)
+                                            # For demonstration, use a fixed MD_target - in real implementation, this should come from user settings
+                                            md_target = 150.0  # kW - This should be dynamically calculated from monthly targets
+                                            
+                                            # Calculate required shave values based on forecast bands
+                                            forecast_calc = forecast_full_data.copy()
+                                            
+                                            # Conservative requirement (P90): ensures only 10% chance of undershaving
+                                            forecast_calc['r90_conservative'] = np.maximum(0, forecast_calc['forecast_p90'] - md_target)
+                                            
+                                            # Aggressive requirement (P50): minimizes wasted discharge  
+                                            forecast_calc['r50_aggressive'] = np.maximum(0, forecast_calc['forecast_p50'] - md_target)
+                                            
+                                            # Uncertainty score: wider band = more uncertain
+                                            forecast_calc['uncertainty_score'] = forecast_calc['forecast_p90'] - forecast_calc['forecast_p10']
+                                            
+                                            # Calculate weighted requirement with uncertainty-based alpha
+                                            # Normalize uncertainty score to [0,1] range for alpha calculation
+                                            max_uncertainty = forecast_calc['uncertainty_score'].max()
+                                            min_uncertainty = forecast_calc['uncertainty_score'].min()
+                                            
+                                            if max_uncertainty > min_uncertainty:
+                                                forecast_calc['alpha'] = (forecast_calc['uncertainty_score'] - min_uncertainty) / (max_uncertainty - min_uncertainty)
+                                            else:
+                                                forecast_calc['alpha'] = 0.5  # Default to balanced approach if no uncertainty variation
+                                            
+                                            # Weighted requirement: r(t) = α * r90(t) + (1-α) * r50(t)
+                                            forecast_calc['r_weighted'] = (
+                                                forecast_calc['alpha'] * forecast_calc['r90_conservative'] + 
+                                                (1 - forecast_calc['alpha']) * forecast_calc['r50_aggressive']
+                                            )
+                                            
+                                            # Store processed data
+                                            shave_requirements_data = forecast_calc
+                                            st.session_state['shave_requirements_data'] = shave_requirements_data
+                                            
+                                            # Display simple values table with P10/P50/P90 and calculated targets
+                                            st.markdown("##### 📊 Forecast Values & Shave Targets")
+                                            
+                                            # Create simple table with current/sample values
+                                            # Use the latest values or first available values for display
+                                            latest_idx = forecast_calc.index[-1] if len(forecast_calc) > 0 else 0
+                                            sample_row = forecast_calc.iloc[latest_idx] if len(forecast_calc) > 0 else None
+                                            
+                                            if sample_row is not None:
+                                                values_table_data = {
+                                                    'Parameter': [
+                                                        'P10 Forecast (kW)',
+                                                        'P50 Forecast (kW)', 
+                                                        'P90 Forecast (kW)',
+                                                        'r90(t): Conservative Shave Target (kW)',
+                                                        'r50(t): Aggressive Shave Target (kW)',
+                                                        'U(t): Uncertainty Score (kW)'
+                                                    ],
+                                                    'Current Value': [
+                                                        f"{sample_row['forecast_p10']:.1f}",
+                                                        f"{sample_row['forecast_p50']:.1f}",
+                                                        f"{sample_row['forecast_p90']:.1f}",
+                                                        f"{sample_row['r90_conservative']:.1f}",
+                                                        f"{sample_row['r50_aggressive']:.1f}",
+                                                        f"{sample_row['uncertainty_score']:.1f}"
+                                                    ],
+                                                    'Average Value': [
+                                                        f"{forecast_calc['forecast_p10'].mean():.1f}",
+                                                        f"{forecast_calc['forecast_p50'].mean():.1f}",
+                                                        f"{forecast_calc['forecast_p90'].mean():.1f}",
+                                                        f"{forecast_calc['r90_conservative'].mean():.1f}",
+                                                        f"{forecast_calc['r50_aggressive'].mean():.1f}",
+                                                        f"{forecast_calc['uncertainty_score'].mean():.1f}"
+                                                    ]
+                                                }
+                                                
+                                                values_df = pd.DataFrame(values_table_data)
+                                                st.dataframe(values_df, use_container_width=True, hide_index=True)
+                                                
+                                                # Add calculation formulas
+                                                with st.expander("📋 Calculation Formulas"):
+                                                    st.markdown(f"""
+                                                    **Forecast Bands:**
+                                                    - P10, P50, P90: Generated from historical residual distributions
+                                                    
+                                                    **Shave Targets:** (MD Target = {md_target} kW)
+                                                    - `r90(t) = max(0, P90(t) - {md_target})` ← Conservative (10% undershave risk)
+                                                    - `r50(t) = max(0, P50(t) - {md_target})` ← Aggressive (minimizes waste)
+                                                    
+                                                    **Uncertainty:**
+                                                    - `U(t) = P90(t) - P10(t)` ← Forecast confidence band width
+                                                    """)
+                                            
+                                            # Display summary table
+                                            st.markdown("##### 📋 Shave Requirements Summary")
+                                            
+                                            # Calculate summary statistics
+                                            avg_conservative = forecast_calc['r90_conservative'].mean()
+                                            avg_aggressive = forecast_calc['r50_aggressive'].mean() 
+                                            avg_weighted = forecast_calc['r_weighted'].mean()
+                                            avg_uncertainty = forecast_calc['uncertainty_score'].mean()
+                                            max_uncertainty_val = forecast_calc['uncertainty_score'].max()
+                                            
+                                            # Create summary table
+                                            summary_data = {
+                                                'Metric': [
+                                                    'MD Target (kW)',
+                                                    'Average Conservative Req (P90)',
+                                                    'Average Aggressive Req (P50)', 
+                                                    'Average Weighted Requirement',
+                                                    'Average Uncertainty Score',
+                                                    'Maximum Uncertainty Score',
+                                                    'Records Processed'
+                                                ],
+                                                'Value': [
+                                                    f"{md_target:.1f}",
+                                                    f"{avg_conservative:.1f} kW",
+                                                    f"{avg_aggressive:.1f} kW",
+                                                    f"{avg_weighted:.1f} kW", 
+                                                    f"{avg_uncertainty:.1f} kW",
+                                                    f"{max_uncertainty_val:.1f} kW",
+                                                    f"{len(forecast_calc):,}"
+                                                ]
+                                            }
+                                            
+                                            summary_df = pd.DataFrame(summary_data)
+                                            st.dataframe(summary_df, use_container_width=True, hide_index=True)
+                                            
+                                            # Show sample calculations
+                                            with st.expander("🔍 View Sample Calculations"):
+                                                st.markdown("**Sample of shave requirement calculations:**")
+                                                display_cols = ['t', 'forecast_p10', 'forecast_p50', 'forecast_p90', 
+                                                              'r50_aggressive', 'r90_conservative', 'uncertainty_score', 
+                                                              'alpha', 'r_weighted']
+                                                sample_data = forecast_calc[display_cols].head(10)
+                                                st.dataframe(sample_data, use_container_width=True)
+                                                
+                                                st.markdown("**Calculation Logic:**")
+                                                st.code(f"""
+# Conservative (P90): r90(t) = max(0, ŷP90(t) - {md_target})
+# Aggressive (P50):   r50(t) = max(0, ŷP50(t) - {md_target}) 
+# Uncertainty:        U(t) = ŷP90(t) - ŷP10(t)
+# Alpha (0-1):        α grows with uncertainty
+# Weighted:           r(t) = α * r90(t) + (1-α) * r50(t)
+                                                """)
+                                            
+                                            st.success("✅ Forecast-based shave requirements calculated successfully!")
+                                            
+                                        except Exception as e:
+                                            st.error(f"❌ Error calculating shave requirements: {str(e)}")
+                                            shave_requirements_data = None
+                                    else:
+                                        st.warning("⚠️ P10/P50/P90 forecast bands not available - generate forecasts first")
+                                else:
+                                    st.warning("⚠️ No forecast data available for shave requirements calculation")
+                            
+                            else:
+                                st.markdown("#### 📈 Historical Data Processing")
+                                
+                                if 'shaving_historical_data' in st.session_state:
+                                    historical_data = st.session_state['shaving_historical_data']
+                                    
+                                    st.info(f"📊 Historical data loaded: {len(historical_data):,} records available for analysis")
+                                    st.markdown("**Note:** Shave requirements will be calculated based on historical patterns and user-defined targets")
+                                    
+                                    # Store historical data reference
+                                    shave_requirements_data = historical_data
+                                    st.session_state['shave_requirements_data'] = historical_data
+                                else:
+                                    st.warning("⚠️ No historical data available - please upload data first")
+                            
+                            st.markdown("---")
                             
                             # Shaving Strategy Selection Dropdown
                             st.markdown("#### 🔧 Strategy Configuration")
@@ -3354,206 +4031,533 @@ error_10min = forecast_10min - actual_value
                                 else:
                                     st.warning("⚠️ Upload historical data first to enable strategy implementation")
                             
-                    except Exception as e:
-                        st.error(f"❌ Error in V2 battery configuration: {str(e)}")
-                        st.info("Some V2 features may not be available in this environment.")
-                        
-                    # =============================================================================
-                    # V2 BATTERY SIMULATION AND RESULTS DISPLAY SECTION
-                    # =============================================================================
-                    st.markdown("---")
-                    st.markdown("## 🔋 Battery Simulation Results")
-                    
-                    # Check if we have all necessary data and configuration
-                    if battery_config and battery_config.get('run_analysis', False):
-                        data_ready = False
-                        simulation_data = None
-                        power_column = None
-                        
-                        # Determine data source based on forecast mode
-                        if enable_forecasting and forecast_data_available:
-                            # Use forecast data
-                            simulation_data = st.session_state['shaving_forecast_data']['full_data']
-                            # Use P50 forecast as the main power column for simulation
-                            power_column = 'forecast_p50'
-                            st.success("🔮 **Running simulation with P50 forecast data**")
-                            data_ready = True
+                            # Strategy Execution
+                            st.markdown("#### 🚀 Strategy Execution")
                             
-                        elif not enable_forecasting and 'shaving_historical_data' in st.session_state:
-                            # Use historical data
-                            simulation_data = st.session_state['df_processed']
-                            power_column = st.session_state.get('v2_power_col', simulation_data.columns[0])
-                            st.success("📊 **Running simulation with historical data**")
-                            data_ready = True
-                            
-                        else:
-                            st.warning("⚠️ No data available for simulation. Please generate forecast data or upload historical data.")
-                            data_ready = False
-                        
-                        if data_ready and simulation_data is not None:
-                            try:
-                                # Get monthly targets from V2 calculation
-                                if 'v2_monthly_targets' in st.session_state:
-                                    monthly_targets = st.session_state['v2_monthly_targets']
-                                else:
-                                    st.error("❌ Monthly targets not calculated. Please configure battery settings first.")
-                                    monthly_targets = None
+                            # 3) ONE-SHOT DIAGNOSTICS PANEL
+                            with st.expander("🔍 Debug: Session State", expanded=False):
+                                st.write("**Session State Overview:**")
+                                debug_keys = ['df_processed', 'tabled_analysis_selected_battery', 'v2_main_battery_model', 'battery_quantity']
+                                state_overview = {k: type(st.session_state.get(k, None)).__name__ for k in debug_keys}
+                                st.write(state_overview)
                                 
-                                if monthly_targets is not None:
-                                    # Extract battery parameters from battery_config
-                                    battery_sizing = {
-                                        'capacity_kwh': battery_config.get('capacity_kwh', 100),
-                                        'power_rating_kw': battery_config.get('power_kw', 100)
-                                    }
+                                st.write("**Tabled Analysis Battery Value:**")
+                                battery_value = st.session_state.get('tabled_analysis_selected_battery', 'NOT_SET')
+                                st.write(f"Type: {type(battery_value)}")
+                                st.write(f"Value: {battery_value}")
+                                
+                                st.write("**Helper Function Results:**")
+                                st.write(f"has_selected_battery(): {has_selected_battery()}")
+                                battery_data = get_selected_battery_data()
+                                st.write(f"get_selected_battery_data(): {battery_data}")
+                            
+                            # Implementation logic based on selected strategy
+                            if selected_strategy == "Default Shaving":
+                                st.markdown("##### 🔋 Default Shaving Strategy")
+                                st.info("**Basic peak shaving using battery discharge when demand exceeds monthly targets**")
+                                
+                                # Check prerequisites using standardized helper
+                                if 'df_processed' in st.session_state and has_selected_battery():
                                     
-                                    battery_params = {
-                                        'round_trip_efficiency': battery_config.get('efficiency', 85),
-                                        'depth_of_discharge': battery_config.get('dod', 85)
-                                    }
-                                    
-                                    # Set up simulation parameters
-                                    interval_hours = 0.25  # 15-minute intervals
-                                    selected_tariff = st.session_state.get('selected_tariff_dict')
-                                    holidays = st.session_state.get('holidays', set())
-                                    
-                                    # Run the battery simulation
-                                    st.markdown("### 🔄 Running Battery Operation Simulation...")
-                                    with st.spinner("Simulating battery operation..."):
-                                        simulation_results = _simulate_battery_operation_v2(
-                                            df=simulation_data,
-                                            power_col=power_column,
-                                            monthly_targets=monthly_targets,
-                                            battery_sizing=battery_sizing,
-                                            battery_params=battery_params,
-                                            interval_hours=interval_hours,
-                                            selected_tariff=selected_tariff,
-                                            holidays=holidays
-                                        )
-                                    
-                                    if simulation_results and 'df_sim' in simulation_results:
-                                        st.success("✅ **Battery simulation completed successfully!**")
-                                        
-                                        # Display simulation summary
-                                        df_sim = simulation_results['df_sim']
-                                        
-                                        # Summary metrics
-                                        col1, col2, col3, col4 = st.columns(4)
-                                        with col1:
-                                            total_discharge = df_sim[df_sim['Battery_Power'] > 0]['Battery_Power'].sum() * interval_hours
-                                            st.metric("Total Discharge", f"{total_discharge:.1f} kWh")
-                                            
-                                        with col2:
-                                            total_charge = abs(df_sim[df_sim['Battery_Power'] < 0]['Battery_Power'].sum()) * interval_hours
-                                            st.metric("Total Charge", f"{total_charge:.1f} kWh")
-                                            
-                                        with col3:
-                                            peak_reduction = df_sim['Original_Demand'].max() - df_sim['Net_Demand'].max()
-                                            st.metric("Peak Reduction", f"{peak_reduction:.1f} kW")
-                                            
-                                        with col4:
-                                            avg_soc = df_sim['SOC_Percent'].mean()
-                                            st.metric("Avg SOC", f"{avg_soc:.1f}%")
-                                        
-                                        # Display the comprehensive battery simulation chart
-                                        st.markdown("### 📊 Interactive Battery Operation Analysis")
-                                        _display_v2_battery_simulation_chart(
-                                            df_sim=df_sim,
-                                            monthly_targets=monthly_targets,
-                                            sizing=battery_sizing,
-                                            selected_tariff=selected_tariff,
-                                            holidays=holidays
+                                    if st.button("Execute Default Shaving Strategy", key="execute_default_shaving"):
+                                        # Execute basic shave strategy
+                                        strategy_results = implement_basic_shave_strategy(
+                                            df_processed,
+                                            power_col,
+                                            st.session_state.get('strategy_config', {}),
+                                            {},  # Battery config handled internally
+                                            selected_tariff,
+                                            holidays
                                         )
                                         
-                                        # Store simulation results for further analysis
-                                        st.session_state['v2_simulation_results'] = simulation_results
+                                        # Store results
+                                        st.session_state['strategy_execution_results'] = strategy_results
+                                        
+                                        if strategy_results['status'] == 'success':
+                                            st.success("✅ Default shaving strategy completed successfully!")
+                                        else:
+                                            st.error(f"❌ Strategy execution failed: {strategy_results['message']}")
+                                else:
+                                    st.warning("⚠️ Prerequisites not met:")
+                                    if 'df_processed' not in st.session_state:
+                                        st.warning("- Upload and process data first")
+                                    if not has_selected_battery():
+                                        st.warning("- Select a battery from 'Tabled Analysis' or 'V2 Battery Configuration' section above")
+                            
+                            elif selected_strategy == "SOC-Aware":
+                                st.markdown("##### � SOC-Aware Strategy")
+                                st.info("**Battery health-conscious optimization (Implementation coming soon)**")
+                                st.code("# SOC-aware strategy implementation placeholder")
+                                
+                            elif selected_strategy == "Hybrid":
+                                st.markdown("##### � Hybrid Strategy")
+                                st.info("**Multi-objective optimization with dynamic switching (Implementation coming soon)**")
+                                st.code("# Hybrid strategy implementation placeholder")
+                            
+                            elif selected_strategy in ["Policy A (Forecast Only)", "Policy B (Forecast Only)", "Policy C (Forecast Only)"]:
+                                st.markdown(f"##### 🔮 {selected_strategy}")
+                                st.info(f"**Advanced forecast-based strategy (Implementation coming soon)**")
+                                st.code(f"# {selected_strategy} implementation placeholder")
+                            
+                            else:
+                                st.info("🔧 **Strategy Implementation**: Logic will be added here for the selected strategy")
+                            
+                            # =============================================================================
+                            # BATTERY SHAVING STRATEGY FUNCTIONS (UNCOMMENTED FROM V2)
+                            # =============================================================================
+                            
+                            def _create_v2_dynamic_target_series(simulation_index, monthly_targets):
+                                """
+                                Create a dynamic target series that matches the simulation dataframe index
+                                with stepped monthly targets from V2's monthly_targets.
+                                """
+                                target_series = pd.Series(index=simulation_index, dtype=float)
+                                
+                                for timestamp in simulation_index:
+                                    # Get the month period for this timestamp
+                                    month_period = timestamp.to_period('M')
+                                    
+                                    # Find the corresponding monthly target
+                                    if month_period in monthly_targets.index:
+                                        target_series.loc[timestamp] = monthly_targets.loc[month_period]
+                                    else:
+                                        # Fallback: use the closest available monthly target
+                                        available_months = list(monthly_targets.index)
+                                        if available_months:
+                                            # Find the closest month
+                                            closest_month = min(available_months, 
+                                                              key=lambda m: abs((timestamp.to_period('M') - m).n))
+                                            target_series.loc[timestamp] = monthly_targets.loc[closest_month]
+                                        else:
+                                            # Ultimate fallback
+                                            target_series.loc[timestamp] = 1000.0  # Safe default
+                                
+                                return target_series
+                            
+                            def is_md_window(timestamp, holidays=None):
+                                """
+                                Check if timestamp is within MD recording window (2PM-10PM weekdays, excluding holidays)
+                                """
+                                if timestamp.weekday() >= 5:  # Weekend
+                                    return False
+                                if holidays and timestamp.date() in holidays:  # Holiday
+                                    return False
+                                if not (14 <= timestamp.hour < 22):  # Outside 2PM-10PM
+                                    return False
+                                return True
+                            
+                            def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizing, battery_params, interval_hours, selected_tariff=None, holidays=None):
+                                """
+                                V2-specific battery simulation that ensures Net Demand NEVER goes below monthly targets.
+                                
+                                Key V2 Innovation: Monthly targets act as FLOOR values for Net Demand.
+                                - Net Demand must stay ABOVE or EQUAL to the monthly target at all times
+                                - Battery discharge is limited to keep Net Demand >= Monthly Target
+                                - Uses dynamic monthly targets instead of static target
+                                - TOU ENHANCEMENT: Special charging precondition for TOU tariffs (95% SOC by 2PM)
+                                
+                                Args:
+                                    df: Energy data DataFrame with datetime index
+                                    power_col: Name of power demand column
+                                    monthly_targets: Series with Period index containing monthly targets
+                                    battery_sizing: Dictionary with capacity_kwh, power_rating_kw
+                                    battery_params: Dictionary with efficiency, depth_of_discharge
+                                    interval_hours: Time interval in hours (e.g., 0.25 for 15-min)
+                                    selected_tariff: Tariff configuration
+                                    holidays: Set of holiday dates
+                                    
+                                Returns:
+                                    Dictionary with simulation results and V2-specific metrics
+                                """
+                                import numpy as np
+                                import pandas as pd
+                                
+                                # Create simulation dataframe
+                                df_sim = df[[power_col]].copy()
+                                df_sim['Original_Demand'] = df_sim[power_col]
+                                
+                                # V2 ENHANCEMENT: Create dynamic monthly target series for each timestamp
+                                target_series = _create_v2_dynamic_target_series(df_sim.index, monthly_targets)
+                                df_sim['Monthly_Target'] = target_series
+                                df_sim['Excess_Demand'] = (df_sim[power_col] - df_sim['Monthly_Target']).clip(lower=0)
+                                
+                                # Battery state variables
+                                battery_capacity = battery_sizing['capacity_kwh']
+                                usable_capacity = battery_capacity * (battery_params.get('depth_of_discharge', 80) / 100)
+                                max_power = battery_sizing['power_rating_kw']
+                                efficiency = battery_params.get('round_trip_efficiency', 95) / 100
+                                
+                                # Initialize battery state
+                                soc = np.zeros(len(df_sim))  # State of Charge in kWh
+                                soc_percent = np.zeros(len(df_sim))  # SOC as percentage
+                                battery_power = np.zeros(len(df_sim))  # Positive = discharge, Negative = charge
+                                net_demand = df_sim[power_col].copy()
+                                
+                                # V2 SIMULATION LOOP - Monthly Target Floor Implementation
+                                for i in range(len(df_sim)):
+                                    current_demand = df_sim[power_col].iloc[i]
+                                    monthly_target = df_sim['Monthly_Target'].iloc[i]
+                                    excess = max(0, current_demand - monthly_target)
+                                    current_timestamp = df_sim.index[i]
+                                    
+                                    # Determine if discharge is allowed based on tariff type
+                                    should_discharge = excess > 0
+                                    
+                                    if selected_tariff and should_discharge:
+                                        # Apply TOU logic for discharge decisions
+                                        tariff_type = selected_tariff.get('Type', '').lower()
+                                        tariff_name = selected_tariff.get('Tariff', '').lower()
+                                        is_tou_tariff = tariff_type == 'tou' or 'tou' in tariff_name
+                                        
+                                        if is_tou_tariff:
+                                            # TOU tariffs: Only discharge during MD windows (2PM-10PM weekdays)
+                                            should_discharge = (excess > 0) and is_md_window(current_timestamp, holidays)
+                                        # For General tariffs, discharge anytime above target (24/7 MD recording)
+                                    
+                                    if should_discharge:  # V2 ENHANCED DISCHARGE LOGIC - Monthly Target Floor
+                                        # V2 CRITICAL CONSTRAINT: Calculate maximum discharge that keeps Net Demand >= Monthly Target
+                                        max_allowable_discharge = current_demand - monthly_target
+                                        
+                                        # Get current SOC
+                                        current_soc_kwh = soc[i-1] if i > 0 else usable_capacity * 0.80  # Start at 80% SOC
+                                        current_soc_percent = (current_soc_kwh / usable_capacity) * 100
+                                        
+                                        # Calculate required discharge power with constraints
+                                        required_discharge = min(
+                                            max_allowable_discharge,  # MD target constraint
+                                            max_power  # Battery power rating
+                                        )
+                                        
+                                        # Check if battery has enough energy (with 5% minimum SOC safety protection)
+                                        available_energy = current_soc_kwh
+                                        min_soc_energy = usable_capacity * 0.05  # 5% minimum safety SOC
+                                        max_discharge_energy = max(0, available_energy - min_soc_energy)
+                                        max_discharge_power = min(max_discharge_energy / interval_hours, required_discharge)
+                                        
+                                        actual_discharge = max(0, max_discharge_power)
+                                        battery_power[i] = actual_discharge
+                                        soc[i] = current_soc_kwh - actual_discharge * interval_hours
+                                        
+                                        # V2 GUARANTEE: Net Demand = Original Demand - Discharge, but NEVER below Monthly Target
+                                        net_demand_candidate = current_demand - actual_discharge
+                                        net_demand.iloc[i] = max(net_demand_candidate, monthly_target)
+                                        
+                                    else:  # Can charge battery if there's room and low demand
+                                        if i > 0:
+                                            soc[i] = soc[i-1]
+                                        else:
+                                            soc[i] = usable_capacity * 0.8
+                                            
+                                        net_demand.iloc[i] = current_demand
+                                    
+                                    # Ensure SOC stays within 5%-95% limits
+                                    soc[i] = max(usable_capacity * 0.05, min(soc[i], usable_capacity * 0.95))
+                                    soc_percent[i] = (soc[i] / usable_capacity) * 100
+                                
+                                # Add V2 simulation results to dataframe
+                                df_sim['Battery_Power_kW'] = battery_power
+                                df_sim['Battery_SOC_kWh'] = soc
+                                df_sim['Battery_SOC_Percent'] = soc_percent
+                                df_sim['Net_Demand_kW'] = net_demand
+                                df_sim['Peak_Shaved'] = df_sim['Original_Demand'] - df_sim['Net_Demand_kW']
+                                
+                                # Calculate performance metrics
+                                total_energy_discharged = sum([p * interval_hours for p in battery_power if p > 0])
+                                peak_reduction = df_sim['Original_Demand'].max() - df_sim['Net_Demand_kW'].max()
+                                
+                                return {
+                                    'df_simulation': df_sim,
+                                    'total_energy_discharged': total_energy_discharged,
+                                    'peak_reduction_kw': peak_reduction,
+                                    'success_rate_percent': 85.0,  # Placeholder
+                                    'average_soc': np.mean(soc_percent),
+                                    'min_soc': np.min(soc_percent),
+                                    'max_soc': np.max(soc_percent)
+                                }
+                                        st.error("❌ Could not retrieve battery data")
+                                        return {'status': 'error', 'message': 'Invalid battery data'}
+                                    
+                                    battery_spec = None
+                                    quantity = 1
+                                    battery_source = None
+                                    
+                                    # Use standardized battery data from helper function
+                                    if battery_data.get('source') != 'v2_config':  # Tabled analysis selection
+                                        try:
+                                            if isinstance(battery_data, dict) and 'spec' in battery_data:
+                                                battery_spec = battery_data['spec']
+                                                quantity = getattr(st.session_state, 'tabled_analysis_battery_quantity', 1)
+                                                battery_source = "Tabled Analysis"
+                                                st.success(f"✅ Battery loaded from Tabled Analysis: {battery_data.get('label', 'Unknown')}")
+                                            else:
+                                                st.warning(f"⚠️ Invalid tabled_analysis_selected_battery format: {type(battery_data)}")
+                                        except Exception as e:
+                                            st.warning(f"⚠️ Error accessing tabled_analysis_selected_battery: {str(e)}")
+                                    
+                                    # Method 2: Fallback to V2 main battery configuration
+                                    elif ('v2_main_battery_model' in st.session_state and 
+                                          st.session_state.v2_main_battery_model and 
+                                          'battery_quantity' in st.session_state):
+                                        
+                                        try:
+                                            # Load battery database to get specs
+                                            battery_db = load_vendor_battery_database()
+                                            if battery_db:
+                                                # Create battery options to find the selected one
+                                                battery_options = {}
+                                                for battery_id, spec in battery_db.items():
+                                                    label = f"{spec.get('company', 'Unknown')} {spec.get('model', 'Unknown')} ({spec.get('energy_kWh', 0)}kWh)"
+                                                    battery_options[label] = {
+                                                        'id': battery_id,
+                                                        'spec': spec,
+                                                        'capacity': spec.get('energy_kWh', 0)
+                                                    }
+                                                
+                                                selected_battery_label = st.session_state.v2_main_battery_model
+                                                if selected_battery_label in battery_options:
+                                                    battery_data = battery_options[selected_battery_label]
+                                                    battery_spec = battery_data['spec']
+                                                    quantity = st.session_state.battery_quantity
+                                                    battery_source = "V2 Main Configuration"
+                                                    st.info(f"🔄 Battery loaded from V2 Configuration: {selected_battery_label}")
+                                                else:
+                                                    st.warning(f"⚠️ V2 battery model '{selected_battery_label}' not found in database")
+                                            else:
+                                                st.warning("⚠️ Battery database not available for V2 fallback")
+                                        except Exception as e:
+                                            st.warning(f"⚠️ Error loading V2 battery configuration: {str(e)}")
+                                    
+                                    else:
+                                        st.warning("⚠️ No battery configuration found")
+                                        st.write("**Available battery-related session keys:**")
+                                        battery_keys = [k for k in st.session_state.keys() if 'battery' in k.lower()]
+                                        if battery_keys:
+                                            for key in battery_keys:
+                                                key_data = st.session_state[key]
+                                                st.write(f"- {key}: {type(key_data)} = {str(key_data)[:100]}...")
+                                        else:
+                                            st.write("- No battery-related keys found")
+                                    
+                                    # Configure battery sizing based on available specs
+                                    if battery_spec and battery_source:
+                                        st.success(f"✅ Using battery from {battery_source} with {quantity} units")
+                                        
+                                        # Battery sizing
+                                        battery_sizing = {
+                                            'capacity_kwh': battery_spec.get('energy_kWh', 100) * quantity,
+                                            'power_rating_kw': battery_spec.get('power_kW', 50) * quantity
+                                        }
+                                        
+                                        # Battery parameters
+                                        battery_params = {
+                                            'depth_of_discharge': 85.0,  # 85% DoD
+                                            'round_trip_efficiency': 92.0,  # 92% efficiency
+                                            'min_soc': 5.0,
+                                            'max_soc': 95.0
+                                        }
+                                        
+                                        # Display battery configuration
+                                        st.info(f"""
+                                        **Battery Configuration Summary:**
+                                        - Source: {battery_source}
+                                        - Model: {battery_spec.get('company', 'Unknown')} {battery_spec.get('model', 'Unknown')}
+                                        - Quantity: {quantity} units
+                                        - Total Capacity: {battery_sizing['capacity_kwh']:.1f} kWh
+                                        - Total Power: {battery_sizing['power_rating_kw']:.1f} kW
+                                        """)
                                         
                                     else:
-                                        st.error("❌ Battery simulation failed. Please check your configuration.")
+                                        st.warning("⚠️ Using default battery configuration - no valid battery selection found")
                                         
-                            except Exception as e:
-                                st.error(f"❌ Error during battery simulation: {str(e)}")
-                                st.info("Please check your data and configuration settings.")
-                    
-                    else:
-                        st.info("🔋 **Enable 'Run V2 Analysis' in Battery Configuration to see simulation results**")
-                        
-                    # Strategy Implementation and Testing
-                    st.markdown("#### 🚀 Strategy Execution")
-                    
-                    # Get battery configuration for strategy testing
-                    if battery_config and battery_config.get('run_analysis', False):
-                        battery_power_kw = battery_config.get('power_kw', 100)  # Default 100kW if not specified
-                        
-                        # Strategy Testing Interface
-                        st.markdown("**🔬 Test Strategy Parameters:**")
-                        
-                        col1, col2, col3 = st.columns(3)
-                        with col1:
-                            test_soc = st.slider("Current SOC (%)", min_value=5, max_value=100, value=50, step=5, 
-                                                help="State of charge to test strategy behavior")
-                        with col2:
-                            test_excess = st.slider("Demand Excess (kW)", min_value=0, max_value=200, value=80, step=10,
-                                                   help="Excess demand above target that needs shaving")
-                        with col3:
-                            st.metric("Battery Power", f"{battery_power_kw:.0f} kW", help="Maximum discharge power from battery config")
-                        
-                        # Strategy Comparison
-                        if st.button("🔍 Compare Strategies", help="Compare Default vs SOC-Aware strategies with current parameters"):
+                                        # Default battery configuration
+                                        battery_sizing = {
+                                            'capacity_kwh': 100,
+                                            'power_rating_kw': 50
+                                        }
+                                        battery_params = {
+                                            'depth_of_discharge': 85.0,
+                                            'round_trip_efficiency': 92.0,
+                                            'min_soc': 5.0,
+                                            'max_soc': 95.0
+                                        }
+                                        battery_params = {
+                                            'depth_of_discharge': 85.0,
+                                            'round_trip_efficiency': 92.0,
+                                            'min_soc': 5.0,
+                                            'max_soc': 95.0
+                                        }
+                                    
+                                    # Get data interval
+                                    interval_hours = _get_dynamic_interval_hours(df_processed)
+                                    
+                                    # Execute battery simulation with basic shave strategy
+                                    with st.spinner("🔄 Running basic shave strategy simulation..."):
+                                        simulation_results = _simulate_battery_operation_v2(
+                                            df_processed,
+                                            power_col,
+                                            monthly_targets,
+                                            battery_sizing,
+                                            battery_params,
+                                            interval_hours,
+                                            selected_tariff,
+                                            holidays
+                                        )
+                                    
+                                    # Display results
+                                    if simulation_results and 'df_simulation' in simulation_results:
+                                        st.success("✅ Basic shave strategy executed successfully!")
+                                        
+                                        # Key metrics
+                                        col1, col2, col3, col4 = st.columns(4)
+                                        
+                                        with col1:
+                                            st.metric(
+                                                "Peak Reduction",
+                                                f"{simulation_results.get('peak_reduction_kw', 0):.1f} kW"
+                                            )
+                                        
+                                        with col2:
+                                            st.metric(
+                                                "Energy Discharged",
+                                                f"{simulation_results.get('total_energy_discharged', 0):.1f} kWh"
+                                            )
+                                        
+                                        with col3:
+                                            st.metric(
+                                                "Average SOC",
+                                                f"{simulation_results.get('average_soc', 0):.1f}%"
+                                            )
+                                        
+                                        with col4:
+                                            st.metric(
+                                                "Success Rate",
+                                                f"{simulation_results.get('success_rate_percent', 0):.1f}%"
+                                            )
+                                        
+                                        # Display simulation chart
+                                        display_basic_shave_chart(simulation_results['df_simulation'], monthly_targets)
+                                        
+                                        return {
+                                            'status': 'success',
+                                            'results': simulation_results,
+                                            'strategy': 'Basic Shave',
+                                            'message': 'Battery discharges when demand exceeds monthly targets'
+                                        }
+                                    else:
+                                        st.error("❌ Basic shave strategy simulation failed")
+                                        return {
+                                            'status': 'error',
+                                            'message': 'Simulation failed to complete'
+                                        }
+                                        
+                                except Exception as e:
+                                    st.error(f"❌ Error executing basic shave strategy: {str(e)}")
+                                    return {
+                                        'status': 'error',
+                                        'message': str(e)
+                                    }
                             
-                            # Test both strategies
-                            default_result = _get_strategy_aware_discharge("Default Shaving", test_soc, test_excess, battery_power_kw)
-                            soc_aware_result = _get_strategy_aware_discharge("SOC-Aware", test_soc, test_excess, battery_power_kw)
+                            def display_basic_shave_chart(df_sim, monthly_targets):
+                                """
+                                Display basic chart showing battery operation and demand shaving.
+                                """
+                                import plotly.graph_objects as go
+                                
+                                st.markdown("#### 📊 Basic Shave Strategy Results")
+                                
+                                fig = go.Figure()
+                                
+                                # Original demand line
+                                fig.add_trace(go.Scatter(
+                                    x=df_sim.index,
+                                    y=df_sim['Original_Demand'],
+                                    mode='lines',
+                                    name='Original Demand',
+                                    line=dict(color='blue', width=2)
+                                ))
+                                
+                                # Net demand after battery
+                                fig.add_trace(go.Scatter(
+                                    x=df_sim.index,
+                                    y=df_sim['Net_Demand_kW'],
+                                    mode='lines',
+                                    name='Net Demand (After Battery)',
+                                    line=dict(color='green', width=2)
+                                ))
+                                
+                                # Monthly targets
+                                fig.add_trace(go.Scatter(
+                                    x=df_sim.index,
+                                    y=df_sim['Monthly_Target'],
+                                    mode='lines',
+                                    name='Monthly Target',
+                                    line=dict(color='red', width=2, dash='dash')
+                                ))
+                                
+                                # Battery discharge
+                                discharge_mask = df_sim['Battery_Power_kW'] > 0
+                                if discharge_mask.any():
+                                    fig.add_trace(go.Scatter(
+                                        x=df_sim.index[discharge_mask],
+                                        y=df_sim['Battery_Power_kW'][discharge_mask],
+                                        mode='markers',
+                                        name='Battery Discharge',
+                                        marker=dict(color='orange', size=4),
+                                        yaxis='y2'
+                                    ))
+                                
+                                fig.update_layout(
+                                    title='Basic Shave Strategy: Demand vs Battery Operation',
+                                    xaxis_title='Time',
+                                    yaxis_title='Power (kW)',
+                                    yaxis2=dict(
+                                        title='Battery Power (kW)',
+                                        overlaying='y',
+                                        side='right'
+                                    ),
+                                    height=500,
+                                    hovermode='x unified'
+                                )
+                                
+                                st.plotly_chart(fig, use_container_width=True)
+                                
+                                # SOC chart
+                                fig2 = go.Figure()
+                                fig2.add_trace(go.Scatter(
+                                    x=df_sim.index,
+                                    y=df_sim['Battery_SOC_Percent'],
+                                    mode='lines',
+                                    name='Battery SOC',
+                                    line=dict(color='purple', width=2)
+                                ))
+                                
+                                fig2.update_layout(
+                                    title='Battery State of Charge',
+                                    xaxis_title='Time',
+                                    yaxis_title='SOC (%)',
+                                    height=300
+                                )
+                                
+                                st.plotly_chart(fig2, use_container_width=True)
                             
-                            st.markdown("**📊 Strategy Comparison Results:**")
+                            # Store selected strategy for future use
+                            st.session_state['selected_shaving_strategy'] = selected_strategy
+                            st.session_state['strategy_config'] = {
+                                'strategy': selected_strategy,
+                                'forecasting_enabled': enable_forecasting,
+                                'data_available': forecast_data_available if enable_forecasting else ('shaving_historical_data' in st.session_state)
+                            }
                             
-                            # Create comparison table
-                            comparison_data = {
-                                "Strategy": ["Default (Aggressive)", "SOC-Aware (Conservative)"],
-                                "Discharge Power (kW)": [f"{default_result['power_kw']:.1f}", f"{soc_aware_result['power_kw']:.1f}"],
-                                "Power Difference": ["Baseline", f"{soc_aware_result['power_kw'] - default_result['power_kw']:+.1f} kW"],
-                                "Reasoning": [default_result['reasoning'], soc_aware_result['reasoning']]
-                    }
-                    
-                            comparison_df = pd.DataFrame(comparison_data)
-                            st.dataframe(comparison_df, use_container_width=True)
+                        else:
+                            st.info("💡 Configure battery settings above to see the V2 functionality.")
                             
-                            # Highlight selected strategy
-                            if selected_strategy == "Default Shaving":
-                                st.success(f"✅ **Selected Strategy:** {default_result['strategy_type']} - {default_result['power_kw']:.1f} kW discharge")
-                            elif selected_strategy == "SOC-Aware":
-                                st.success(f"✅ **Selected Strategy:** {soc_aware_result['strategy_type']} - {soc_aware_result['power_kw']:.1f} kW discharge")
-                            
-                            # Strategy recommendations
-                            power_diff = abs(soc_aware_result['power_kw'] - default_result['power_kw'])
-                            if power_diff > 5:  # Significant difference
-                                if test_soc < 25:
-                                    st.info("💡 **Recommendation:** SOC-Aware strategy is safer for low battery levels")
-                                elif test_excess > 100:
-                                    st.info("💡 **Recommendation:** Default strategy provides maximum peak shaving for high demand")
-                                else:
-                                    st.info("💡 **Recommendation:** Both strategies viable - choose based on priority: battery life vs. peak reduction")
-                            else:
-                                st.info("💡 **Note:** Strategies produce similar results for these parameters")
+                    except Exception as e:
+                        st.error(f"❌ Error loading V2 battery controls: {str(e)}")
+                        st.info("Some V2 dependencies may not be available in this environment.")
                 
-                # Current Strategy Status (outside battery config scope)
-                st.markdown("**🎯 Current Strategy Selection:**")
-                if selected_strategy == "Default Shaving":
-                    st.success("**Active:** Default (Aggressive)")
-                    st.info("**Strategy:** Uses 80% excess discharge, 5% min SOC - prioritizes maximum MD cost savings")
-                elif selected_strategy == "SOC-Aware":
-                    st.success("**Active:** SOC-Aware (Conservative)")
-                    st.info("**Strategy:** Uses 60% excess discharge, 20% min SOC - prioritizes battery longevity")
                 else:
-                    st.warning(f"**{selected_strategy}** - Advanced implementation pending")
+                    st.error("❌ Please select both timestamp and power columns to proceed.")
                     
-                    # Store selected strategy for future use
-                    st.session_state['selected_shaving_strategy'] = selected_strategy
-                    st.session_state['strategy_config'] = {
-                        'strategy': selected_strategy,
-                        'forecasting_enabled': enable_forecasting,
-                        'data_available': forecast_data_available if enable_forecasting else ('shaving_historical_data' in st.session_state)
-                    }
-            
             except Exception as e:
                 st.error(f"❌ Error configuring data inputs: {str(e)}")
                 
@@ -9351,494 +10355,4 @@ if __name__ == "__main__":
 #     
 #             st.info("Please select a valid date range to view filtered data.")
 # 
-
-# =============================================================================
-# V2 BATTERY SIMULATION FUNCTIONS
-# =============================================================================
-
-def _create_v2_dynamic_target_series(simulation_index, monthly_targets):
-    """
-    Create a dynamic target series that matches the simulation dataframe index
-    with stepped monthly targets from V2's monthly_targets.
-    
-    Args:
-        simulation_index: DatetimeIndex from the simulation dataframe
-        monthly_targets: V2's monthly targets (Series with Period index)
-        
-    Returns:
-        Series with same index as simulation_index, containing monthly target values
-    """
-    target_series = pd.Series(index=simulation_index, dtype=float)
-    
-    for timestamp in simulation_index:
-        # Get the month period for this timestamp
-        month_period = timestamp.to_period('M')
-        
-        # Find the corresponding monthly target
-        if month_period in monthly_targets.index:
-            target_series.loc[timestamp] = monthly_targets.loc[month_period]
-        else:
-            # Fallback: use the closest available monthly target
-            available_months = list(monthly_targets.index)
-            if available_months:
-                # Find the closest month
-                closest_month = min(available_months, 
-                                  key=lambda m: abs((timestamp.to_period('M') - m).n))
-                target_series.loc[timestamp] = monthly_targets.loc[closest_month]
-            else:
-                # Ultimate fallback
-                target_series.loc[timestamp] = 1000.0  # Safe default
-    
-    return target_series
-
-
-def _calculate_c_rate_limited_power_simple(current_soc_percent, max_power_rating_kw, battery_capacity_kwh, c_rate=1.0):
-    """
-    Simple C-rate power limitation for charging/discharging.
-    
-    Args:
-        current_soc_percent: Current state of charge percentage
-        max_power_rating_kw: Battery's rated power
-        battery_capacity_kwh: Battery's energy capacity
-        c_rate: Battery's C-rate (default 1.0C)
-        
-    Returns:
-        Dictionary with power limits
-    """
-    # Calculate C-rate based power limits
-    c_rate_power_limit = battery_capacity_kwh * c_rate
-    
-    # SOC-based derating (power reduces at extreme SOC levels)
-    if current_soc_percent > 90:
-        soc_factor = 0.8  # Reduce power at high SOC
-    elif current_soc_percent < 20:
-        soc_factor = 0.7  # Reduce power at low SOC
-    else:
-        soc_factor = 1.0  # Full power in normal SOC range
-    
-    # Final power limit is minimum of C-rate limit and rated power
-    effective_max_discharge_kw = min(c_rate_power_limit, max_power_rating_kw) * soc_factor
-    effective_max_charge_kw = min(c_rate_power_limit, max_power_rating_kw) * soc_factor * 0.8  # Charging typically slower
-    
-    return {
-        'max_discharge_power_kw': effective_max_discharge_kw,
-        'max_charge_power_kw': effective_max_charge_kw,
-        'c_rate_power_limit_kw': c_rate_power_limit,
-        'soc_derating_factor': soc_factor,
-        'limiting_factor': 'C-rate' if c_rate_power_limit < max_power_rating_kw else 'Power Rating'
-    }
-
-
-def _get_tou_charging_urgency(current_timestamp, soc_percent, holidays=None):
-    """
-    Determine TOU charging urgency based on time until MD window and current SOC.
-    
-    TOU charging windows:
-    - Primary: 10 PM - 2 PM next day (overnight charging)
-    - Target: 95% SOC by 2 PM on weekdays for MD readiness
-    
-    Args:
-        current_timestamp: Current datetime
-        soc_percent: Current battery SOC percentage
-        holidays: Set of holiday dates
-    
-    Returns:
-        dict: Charging urgency information
-    """
-    from datetime import datetime, timedelta
-    
-    # Check if it's a charging window (10 PM - 2 PM next day)
-    hour = current_timestamp.hour
-    is_weekday = current_timestamp.weekday() < 5
-    is_holiday = holidays and current_timestamp.date() in holidays
-    
-    # TOU charging window: 10 PM to 2 PM next day
-    is_charging_window = hour >= 22 or hour < 14
-    
-    # Calculate time until next MD window (2 PM)
-    current_date = current_timestamp.date()
-    if hour < 14:
-        # Same day 2 PM
-        next_md_start = datetime.combine(current_date, datetime.min.time().replace(hour=14))
-    else:
-        # Next day 2 PM
-        next_day = current_date + timedelta(days=1)
-        next_md_start = datetime.combine(next_day, datetime.min.time().replace(hour=14))
-    
-    # Only consider weekday MD windows
-    while next_md_start.weekday() >= 5 or (holidays and next_md_start.date() in holidays):
-        next_md_start += timedelta(days=1)
-        next_md_start = next_md_start.replace(hour=14, minute=0, second=0, microsecond=0)
-    
-    time_until_md = next_md_start - current_timestamp
-    hours_until_md = time_until_md.total_seconds() / 3600
-    
-    # Determine charging urgency
-    urgency_level = 'normal'
-    charge_rate_multiplier = 1.0
-    
-    if hours_until_md <= 4:  # Less than 4 hours until MD window
-        if soc_percent < 95:
-            urgency_level = 'critical'
-            charge_rate_multiplier = 1.5  # Aggressive charging
-    elif hours_until_md <= 8:  # 4-8 hours until MD window
-        if soc_percent < 90:
-            urgency_level = 'high'
-            charge_rate_multiplier = 1.2  # Enhanced charging
-    elif hours_until_md <= 16:  # 8-16 hours until MD window
-        if soc_percent < 80:
-            urgency_level = 'normal'
-            charge_rate_multiplier = 1.0  # Standard charging
-    
-    return {
-        'urgency_level': urgency_level,
-        'charge_rate_multiplier': charge_rate_multiplier,
-        'hours_until_md': hours_until_md,
-        'is_charging_window': is_charging_window,
-        'is_weekday': is_weekday and not is_holiday,
-        'next_md_window': next_md_start
-    }
-
-
-def is_md_window(timestamp, holidays=None):
-    """
-    Determine if timestamp is in MD recording window based on RP4 tariff rules.
-    
-    Args:
-        timestamp: datetime object
-        holidays: set of holiday dates
-        
-    Returns:
-        bool: True if in MD recording period
-    """
-    # MD recording: 2 PM - 10 PM on weekdays (non-holidays)
-    if holidays and timestamp.date() in holidays:
-        return False
-    
-    if timestamp.weekday() >= 5:  # Weekend
-        return False
-    
-    hour = timestamp.hour
-    return 14 <= hour < 22  # 2 PM to 10 PM
-
-
-def _get_enhanced_shaving_success(row, holidays=None):
-    """
-    Enhanced shaving success classification using comprehensive battery status evaluation.
-    Uses simplified 4-category system for better user understanding.
-    
-    Args:
-        row: DataFrame row with simulation data
-        holidays: Set of holiday dates
-        
-    Returns:
-        str: Success classification with emoji and description
-    """
-    try:
-        timestamp = row.name
-        is_md = is_md_window(timestamp, holidays)
-        
-        # Get key metrics
-        original_demand = row.get('Original_Demand', 0)
-        net_demand = row.get('Net_Demand', original_demand)
-        monthly_target = row.get('Monthly_Target', 0)
-        battery_power = row.get('Battery_Power', 0)
-        soc_percent = row.get('SOC_Percent', 50)
-        
-        # Calculate demand reduction
-        demand_reduction = original_demand - net_demand
-        excess_above_target = max(0, original_demand - monthly_target)
-        
-        # During MD periods
-        if is_md:
-            if net_demand <= monthly_target * 1.05:  # Within 5% tolerance
-                if soc_percent > 20:
-                    return "✅ Success - Target Met"
-                else:
-                    return "🟡 Partial - Target Met (Low SOC)"
-            elif demand_reduction > 0:  # Some battery help
-                if demand_reduction >= excess_above_target * 0.5:  # Reduced 50%+ of excess
-                    return "🟡 Partial - Significant Reduction"
-                else:
-                    return "🟡 Partial - Limited Reduction"
-            else:
-                return "🔴 Failed - No Battery Response"
-        
-        # Outside MD periods
-        else:
-            if battery_power < 0:  # Charging
-                return "✅ Success - Charging"
-            elif battery_power == 0:  # Idle
-                return "✅ Success - Idle"
-            else:  # Discharging outside MD (unusual)
-                return "🟡 Partial - Non-MD Discharge"
-                
-    except Exception as e:
-        return "❓ Unknown"
-
-
-def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizing, battery_params, interval_hours, selected_tariff=None, holidays=None):
-    """
-    V2-specific battery simulation with monthly target floor constraints.
-    """
-    import numpy as np
-    
-    # Create simulation dataframe
-    df_sim = df[[power_col]].copy()
-    df_sim['Original_Demand'] = df_sim[power_col]
-    
-    # V2 ENHANCEMENT: Create dynamic monthly target series
-    target_series = _create_v2_dynamic_target_series(df_sim.index, monthly_targets)
-    df_sim['Monthly_Target'] = target_series
-    df_sim['Excess_Demand'] = (df_sim[power_col] - df_sim['Monthly_Target']).clip(lower=0)
-    
-    # Battery parameters
-    battery_capacity = battery_sizing['capacity_kwh']
-    usable_capacity = battery_capacity * (battery_params['depth_of_discharge'] / 100)
-    max_power = battery_sizing['power_rating_kw']
-    efficiency = battery_params['round_trip_efficiency'] / 100
-    
-    # Initialize arrays
-    soc = np.zeros(len(df_sim))
-    soc_percent = np.zeros(len(df_sim))
-    battery_power = np.zeros(len(df_sim))
-    net_demand = df_sim[power_col].copy()
-    
-    # Main simulation loop
-    for i in range(len(df_sim)):
-        current_demand = df_sim[power_col].iloc[i]
-        monthly_target = df_sim['Monthly_Target'].iloc[i]
-        excess = max(0, current_demand - monthly_target)
-        current_timestamp = df_sim.index[i]
-        
-        # Get current SOC
-        current_soc_kwh = soc[i-1] if i > 0 else usable_capacity * 0.80
-        current_soc_percent = (current_soc_kwh / usable_capacity) * 100
-        
-        # Discharge logic
-        if excess > 0 and is_md_window(current_timestamp, holidays):
-            # Calculate discharge power (limited by monthly target floor)
-            max_allowable_discharge = current_demand - monthly_target
-            
-            # C-rate and SOC constraints
-            power_limits = _calculate_c_rate_limited_power_simple(
-                current_soc_percent, max_power, battery_capacity, 1.0
-            )
-            max_discharge_power = power_limits['max_discharge_power_kw']
-            
-            # Apply all constraints
-            required_discharge = min(
-                max_allowable_discharge,
-                max_power,
-                max_discharge_power
-            )
-            
-            # Check energy availability (5% minimum SOC)
-            min_soc_energy = usable_capacity * 0.05
-            max_discharge_energy = max(0, current_soc_kwh - min_soc_energy)
-            max_discharge_from_energy = max_discharge_energy / interval_hours
-            
-            actual_discharge = min(required_discharge, max_discharge_from_energy)
-            actual_discharge = max(0, actual_discharge)
-            
-            battery_power[i] = actual_discharge
-            soc[i] = current_soc_kwh - actual_discharge * interval_hours
-            net_demand.iloc[i] = max(current_demand - actual_discharge, monthly_target)
-            
-        else:
-            # Charging logic (simplified)
-            soc[i] = current_soc_kwh
-            
-            # Basic charging if demand is low and SOC < 95%
-            if current_soc_percent < 95 and current_demand < monthly_target * 0.8:
-                charge_power = min(max_power * 0.3, (usable_capacity * 0.95 - current_soc_kwh) / interval_hours)
-                if charge_power > 0:
-                    battery_power[i] = -charge_power
-                    soc[i] = current_soc_kwh + charge_power * interval_hours * efficiency
-                    net_demand.iloc[i] = current_demand + charge_power
-                else:
-                    net_demand.iloc[i] = current_demand
-            else:
-                net_demand.iloc[i] = current_demand
-        
-        # Ensure SOC limits
-        soc[i] = max(usable_capacity * 0.05, min(soc[i], usable_capacity * 0.95))
-        soc_percent[i] = (soc[i] / usable_capacity) * 100
-    
-    # Add results to dataframe
-    df_sim['Battery_Power'] = battery_power
-    df_sim['SOC_kWh'] = soc
-    df_sim['SOC_Percent'] = soc_percent
-    df_sim['Net_Demand'] = net_demand
-    
-    # Calculate metrics
-    total_discharge = sum([p * interval_hours for p in battery_power if p > 0])
-    total_charge = sum([abs(p) * interval_hours for p in battery_power if p < 0])
-    
-    return {
-        'df_sim': df_sim,
-        'total_discharge_kwh': total_discharge,
-        'total_charge_kwh': total_charge,
-        'peak_reduction_kw': df_sim['Original_Demand'].max() - df_sim['Net_Demand'].max(),
-        'avg_soc_percent': df_sim['SOC_Percent'].mean()
-    }
-
-
-def _display_v2_battery_simulation_chart(df_sim, monthly_targets=None, sizing=None, selected_tariff=None, holidays=None):
-    """
-    Simplified V2 battery simulation chart display.
-    """
-    if df_sim is None or len(df_sim) == 0:
-        st.error("No simulation data to display")
-        return
-    
-    # Basic filtering
-    st.markdown("##### 📊 Simulation Results Filter")
-    
-    # Success classification
-    if 'Shaving_Success' not in df_sim.columns:
-        df_sim['Shaving_Success'] = df_sim.apply(lambda row: _get_enhanced_shaving_success(row, holidays), axis=1)
-    
-    # Filter options
-    filter_options = ["All Days", "Success Days", "Partial Days", "Failed Days"]
-    selected_filter = st.selectbox("Filter by result type:", filter_options, key="sim_filter")
-    
-    # Apply filter
-    df_filtered = df_sim.copy()
-    if selected_filter == "Success Days":
-        success_days = set(df_sim[df_sim['Shaving_Success'].str.contains('✅', na=False)].index.date)
-        df_filtered = df_sim[pd.Series(df_sim.index.date).isin(success_days).values]
-    elif selected_filter == "Partial Days":
-        partial_days = set(df_sim[df_sim['Shaving_Success'].str.contains('🟡', na=False)].index.date)
-        df_filtered = df_sim[pd.Series(df_sim.index.date).isin(partial_days).values]
-    elif selected_filter == "Failed Days":
-        failed_days = set(df_sim[df_sim['Shaving_Success'].str.contains('🔴', na=False)].index.date)
-        df_filtered = df_sim[pd.Series(df_sim.index.date).isin(failed_days).values]
-    
-    if len(df_filtered) == 0:
-        st.warning("No data matches the selected filter")
-        return
-    
-    # Create 5-panel chart
-    from plotly.subplots import make_subplots
-    import plotly.graph_objects as go
-    
-    fig = make_subplots(
-        rows=5, cols=1,
-        subplot_titles=[
-            "Power Demand & Monthly Targets",
-            "Net Demand After Battery",
-            "Battery Power Output",
-            "Battery State of Charge",
-            "Daily Peak Shaving Performance"
-        ],
-        vertical_spacing=0.08,
-        shared_xaxes=True
-    )
-    
-    # Panel 1: Original demand vs targets
-    fig.add_trace(go.Scatter(
-        x=df_filtered.index,
-        y=df_filtered['Original_Demand'],
-        mode='lines',
-        name='Original Demand',
-        line=dict(color='red', width=2)
-    ), row=1, col=1)
-    
-    fig.add_trace(go.Scatter(
-        x=df_filtered.index,
-        y=df_filtered['Monthly_Target'],
-        mode='lines',
-        name='Monthly Target',
-        line=dict(color='orange', width=2, dash='dash')
-    ), row=1, col=1)
-    
-    # Panel 2: Net demand
-    fig.add_trace(go.Scatter(
-        x=df_filtered.index,
-        y=df_filtered['Net_Demand'],
-        mode='lines',
-        name='Net Demand',
-        line=dict(color='blue', width=2)
-    ), row=2, col=1)
-    
-    fig.add_trace(go.Scatter(
-        x=df_filtered.index,
-        y=df_filtered['Monthly_Target'],
-        mode='lines',
-        name='Monthly Target',
-        line=dict(color='orange', width=1, dash='dash'),
-        showlegend=False
-    ), row=2, col=1)
-    
-    # Panel 3: Battery power
-    colors = ['red' if p > 0 else 'green' if p < 0 else 'gray' for p in df_filtered['Battery_Power']]
-    fig.add_trace(go.Scatter(
-        x=df_filtered.index,
-        y=df_filtered['Battery_Power'],
-        mode='markers',
-        name='Battery Power',
-        marker=dict(color=colors, size=3),
-        hovertemplate='Battery Power: %{y:.1f} kW<br>%{x}<extra></extra>'
-    ), row=3, col=1)
-    
-    # Panel 4: SOC
-    fig.add_trace(go.Scatter(
-        x=df_filtered.index,
-        y=df_filtered['SOC_Percent'],
-        mode='lines',
-        name='SOC %',
-        line=dict(color='purple', width=2),
-        fill='tonexty'
-    ), row=4, col=1)
-    
-    # Panel 5: Daily performance (simplified)
-    daily_stats = df_filtered.groupby(df_filtered.index.date).agg({
-        'Original_Demand': 'max',
-        'Net_Demand': 'max',
-        'Monthly_Target': 'first'
-    })
-    daily_stats['Peak_Reduction'] = daily_stats['Original_Demand'] - daily_stats['Net_Demand']
-    
-    fig.add_trace(go.Bar(
-        x=daily_stats.index,
-        y=daily_stats['Peak_Reduction'],
-        name='Daily Peak Reduction',
-        marker_color='green'
-    ), row=5, col=1)
-    
-    # Update layout
-    fig.update_layout(
-        height=1200,
-        title=f"V2 Battery Simulation Results ({selected_filter})",
-        showlegend=True
-    )
-    
-    # Y-axis labels
-    fig.update_yaxes(title_text="Power (kW)", row=1, col=1)
-    fig.update_yaxes(title_text="Power (kW)", row=2, col=1)
-    fig.update_yaxes(title_text="Power (kW)", row=3, col=1)
-    fig.update_yaxes(title_text="SOC (%)", row=4, col=1)
-    fig.update_yaxes(title_text="Reduction (kW)", row=5, col=1)
-    
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # Summary stats
-    st.markdown("#### 📈 Simulation Summary")
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        avg_reduction = daily_stats['Peak_Reduction'].mean()
-        st.metric("Avg Daily Peak Reduction", f"{avg_reduction:.1f} kW")
-    
-    with col2:
-        success_rate = len([s for s in df_filtered['Shaving_Success'] if '✅' in s]) / len(df_filtered) * 100
-        st.metric("Success Rate", f"{success_rate:.1f}%")
-    
-    with col3:
-        avg_soc = df_filtered['SOC_Percent'].mean()
-        st.metric("Average SOC", f"{avg_soc:.1f}%")
-    
-    with col4:
-        total_cycles = (df_filtered['Battery_Power'].abs().sum() * 0.25) / (sizing['capacity_kwh'] * 2) if sizing else 0
-        st.metric("Est. Total Cycles", f"{total_cycles:.2f}")             
+#             
