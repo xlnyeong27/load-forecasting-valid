@@ -3439,19 +3439,19 @@ error_10min = forecast_10min - actual_value
                                         # Summary metrics
                                         col1, col2, col3, col4 = st.columns(4)
                                         with col1:
-                                            total_discharge = df_sim[df_sim['Battery_Power'] > 0]['Battery_Power'].sum() * interval_hours
+                                            total_discharge = df_sim[df_sim['Battery_Power_kW'] > 0]['Battery_Power_kW'].sum() * interval_hours
                                             st.metric("Total Discharge", f"{total_discharge:.1f} kWh")
                                             
                                         with col2:
-                                            total_charge = abs(df_sim[df_sim['Battery_Power'] < 0]['Battery_Power'].sum()) * interval_hours
+                                            total_charge = abs(df_sim[df_sim['Battery_Power_kW'] < 0]['Battery_Power_kW'].sum()) * interval_hours
                                             st.metric("Total Charge", f"{total_charge:.1f} kWh")
                                             
                                         with col3:
-                                            peak_reduction = df_sim['Original_Demand'].max() - df_sim['Net_Demand'].max()
+                                            peak_reduction = df_sim['Original_Demand'].max() - df_sim['Net_Demand_kW'].max()
                                             st.metric("Peak Reduction", f"{peak_reduction:.1f} kW")
                                             
                                         with col4:
-                                            avg_soc = df_sim['SOC_Percent'].mean()
+                                            avg_soc = df_sim['Battery_SOC_Percent'].mean()
                                             st.metric("Avg SOC", f"{avg_soc:.1f}%")
                                         
                                         # Display the comprehensive battery simulation chart
@@ -9540,10 +9540,10 @@ def _get_enhanced_shaving_success(row, holidays=None):
         
         # Get key metrics
         original_demand = row.get('Original_Demand', 0)
-        net_demand = row.get('Net_Demand', original_demand)
+        net_demand = row.get('Net_Demand_kW', original_demand)
         monthly_target = row.get('Monthly_Target', 0)
-        battery_power = row.get('Battery_Power', 0)
-        soc_percent = row.get('SOC_Percent', 50)
+        battery_power = row.get('Battery_Power_kW', 0)
+        soc_percent = row.get('Battery_SOC_Percent', 50)
         
         # Calculate demand reduction
         demand_reduction = original_demand - net_demand
