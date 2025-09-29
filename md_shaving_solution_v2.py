@@ -9686,159 +9686,422 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
 
 def _display_v2_battery_simulation_chart(df_sim, monthly_targets=None, sizing=None, selected_tariff=None, holidays=None):
     """
-    Simplified V2 battery simulation chart display.
+    V2-specific battery operation simulation chart with DYNAMIC monthly targets.
+    
+    Key V2 Enhancement: Replaces static target line with stepped monthly target line.
+    
+    Args:
+        df_sim: Simulation dataframe with battery operation data
+        monthly_targets: V2's dynamic monthly targets (Series with Period index)
+        sizing: Battery sizing dictionary from V2 analysis
+        selected_tariff: Tariff configuration for MD period detection
+        holidays: Set of holiday dates
     """
-    if df_sim is None or len(df_sim) == 0:
-        st.error("No simulation data to display")
-        return
-    
-    # Basic filtering
-    st.markdown("##### 📊 Simulation Results Filter")
-    
-    # Success classification
-    if 'Shaving_Success' not in df_sim.columns:
-        df_sim['Shaving_Success'] = df_sim.apply(lambda row: _get_enhanced_shaving_success(row, holidays), axis=1)
-    
-    # Filter options
-    filter_options = ["All Days", "Success Days", "Partial Days", "Failed Days"]
-    selected_filter = st.selectbox("Filter by result type:", filter_options, key="sim_filter")
-    
-    # Apply filter
-    df_filtered = df_sim.copy()
-    if selected_filter == "Success Days":
-        success_days = set(df_sim[df_sim['Shaving_Success'].str.contains('✅', na=False)].index.date)
-        df_filtered = df_sim[pd.Series(df_sim.index.date).isin(success_days).values]
-    elif selected_filter == "Partial Days":
-        partial_days = set(df_sim[df_sim['Shaving_Success'].str.contains('🟡', na=False)].index.date)
-        df_filtered = df_sim[pd.Series(df_sim.index.date).isin(partial_days).values]
-    elif selected_filter == "Failed Days":
-        failed_days = set(df_sim[df_sim['Shaving_Success'].str.contains('🔴', na=False)].index.date)
-        df_filtered = df_sim[pd.Series(df_sim.index.date).isin(failed_days).values]
-    
-    if len(df_filtered) == 0:
-        st.warning("No data matches the selected filter")
-        return
-    
-    # Create 5-panel chart
-    from plotly.subplots import make_subplots
     import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
     
-    fig = make_subplots(
-        rows=5, cols=1,
-        subplot_titles=[
-            "Power Demand & Monthly Targets",
-            "Net Demand After Battery",
-            "Battery Power Output",
-            "Battery State of Charge",
-            "Daily Peak Shaving Performance"
-        ],
-        vertical_spacing=0.08,
-        shared_xaxes=True
+    # Handle None parameters with safe defaults
+    if monthly_targets is None:
+        st.error("❌ V2 Chart Error: monthly_targets is required for dynamic target visualization")
+        return
+        
+    if sizing is None:
+        sizing = {'power_rating_kw': 100, 'capacity_kwh': 100}
+    
+    # ===== V2 TWO-LEVEL CASCADING FILTERING =====
+    st.markdown("##### 🎯 V2 Two-Level Cascading Filters")
+    
+    # Success/Failure dropdown filter instead of timestamp filter
+    if len(df_sim) > 0:
+        # Calculate shaving success for each point if not already available
+        if 'Shaving_Success' not in df_sim.columns:
+            # Use the comprehensive battery status if Success_Status exists
+            if 'Success_Status' in df_sim.columns:
+                df_sim['Shaving_Success'] = df_sim['Success_Status']
+            else:
+                df_sim['Shaving_Success'] = df_sim.apply(lambda row: _get_enhanced_shaving_success(row, holidays), axis=1)
+        
+        # ===== LEVEL 1: DAY TYPE FILTER =====
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            filter_options = [
+                "All Days",
+                "All Success Days", 
+                "All Partial Days",
+                "All Failed Days"
+            ]
+            
+            selected_filter = st.selectbox(
+                "🎯 Level 1: Filter by Day Type:",
+                options=filter_options,
+                index=0,
+                key="chart_success_filter",
+                help="First level: Filter chart data to show complete days that contain specific event types"
+            )
+            
+        with col2:
+            if st.button("🔄 Reset All Filters", key="reset_chart_success_filter"):
+                st.session_state.chart_success_filter = "All Days"
+                if 'specific_day_filter' in st.session_state:
+                    del st.session_state.specific_day_filter
+                st.rerun()
+        
+        # ===== LEVEL 2: SPECIFIC DAY FILTER =====
+        level2_days = []
+        
+        # Get available days based on Level 1 filter
+        if selected_filter == "All Success Days":
+            success_patterns = '✅ Success'
+            success_days = df_sim[df_sim['Shaving_Success'].str.contains(success_patterns, na=False)].index.date
+            level2_days = sorted(set(success_days))
+        elif selected_filter == "All Partial Days":
+            partial_patterns = '🟡 Partial'
+            partial_days = df_sim[df_sim['Shaving_Success'].str.contains(partial_patterns, na=False)].index.date
+            level2_days = sorted(set(partial_days))
+        elif selected_filter == "All Failed Days":
+            failed_patterns = '🔴 Failed'
+            failed_days = df_sim[df_sim['Shaving_Success'].str.contains(failed_patterns, na=False)].index.date
+            level2_days = sorted(set(failed_days))
+        else:
+            all_days = sorted(set(df_sim.index.date))
+            level2_days = all_days
+        
+        # Always show Level 2 filter interface
+        st.markdown("**Level 2: Select Specific Day for Detailed Analysis**")
+        col3, col4 = st.columns([5, 1])
+        
+        with col3:
+            # Create options for specific day selection
+            if selected_filter == "All Days":
+                day_options = ["All Days"]
+            else:
+                day_options = ["All " + selected_filter.split()[-2] + " " + selected_filter.split()[-1]]
+            
+            # Add individual days if available
+            if level2_days:
+                day_options.extend([str(day) for day in level2_days])
+            
+            selected_specific_day = st.selectbox(
+                "🎯 Select Specific Day:",
+                options=day_options,
+                index=0,
+                key="specific_day_filter",
+                help="Second level: Choose a specific date for detailed analysis"
+            )
+        
+        with col4:
+            if st.button("🔄 Reset Day", key="reset_specific_day_filter"):
+                if 'specific_day_filter' in st.session_state:
+                    del st.session_state.specific_day_filter
+                st.rerun()
+                
+        # ===== APPLY FILTERS TO DATA =====
+        df_filtered = df_sim.copy()
+        
+        # Apply Level 1 filter
+        if selected_filter == "All Success Days":
+            success_patterns = '✅ Success'
+            success_days = set(df_sim[df_sim['Shaving_Success'].str.contains(success_patterns, na=False)].index.date)
+            df_filtered = df_sim[pd.Series(df_sim.index.date).isin(success_days).values]
+        elif selected_filter == "All Partial Days":
+            partial_patterns = '🟡 Partial'
+            partial_days = set(df_sim[df_sim['Shaving_Success'].str.contains(partial_patterns, na=False)].index.date)
+            df_filtered = df_sim[pd.Series(df_sim.index.date).isin(partial_days).values]
+        elif selected_filter == "All Failed Days":
+            failed_patterns = '🔴 Failed'
+            failed_days = set(df_sim[df_sim['Shaving_Success'].str.contains(failed_patterns, na=False)].index.date)
+            df_filtered = df_sim[pd.Series(df_sim.index.date).isin(failed_days).values]
+        
+        # Apply Level 2 filter (specific day selection)
+        if selected_specific_day not in ["All Days", "All Success Days", "All Partial Days", "All Failed Days"]:
+            try:
+                from datetime import datetime
+                selected_date = datetime.strptime(selected_specific_day, "%Y-%m-%d").date()
+                df_filtered = df_filtered[df_filtered.index.date == selected_date]
+            except:
+                st.error(f"Invalid date format: {selected_specific_day}")
+                return
+        
+        if len(df_filtered) == 0:
+            st.warning(f"No data matches the selected filters: {selected_filter} + {selected_specific_day}")
+            return
+    else:
+        st.error("❌ No simulation data available")
+        return
+    
+    # Resolve Net Demand column name flexibly
+    net_candidates = ['Net_Demand_kW', 'Net_Demand_KW', 'Net_Demand']
+    net_col = next((c for c in net_candidates if c in df_filtered.columns), None)
+    
+    # Validate required columns exist
+    required_base = ['Original_Demand', 'Battery_Power_kW', 'Battery_SOC_Percent']
+    missing_columns = [col for col in required_base if col not in df_filtered.columns]
+    if net_col is None:
+        missing_columns.append('Net_Demand_kW')
+    
+    if missing_columns:
+        st.error(f"❌ Missing required columns in V2 simulation data: {missing_columns}")
+        st.info("Available columns: " + ", ".join(df_filtered.columns.tolist()))
+        return
+    
+    # Create V2 dynamic target series (stepped monthly targets) - filtered to match chart data
+    target_series = _create_v2_dynamic_target_series(df_filtered.index, monthly_targets)
+    
+    # Display filtered event range info
+    if selected_filter != "All Days" and len(df_filtered) > 0:
+        filter_start = df_filtered.index.min()
+        filter_end = df_filtered.index.max()
+        st.info(f"📅 **Filtered Event Range**: {filter_start.strftime('%Y-%m-%d %H:%M')} to {filter_end.strftime('%Y-%m-%d %H:%M')}")
+    
+    # Panel 1: V2 Enhanced MD Shaving Effectiveness with Dynamic Monthly Targets
+    st.markdown("##### 1️⃣ V2 MD Shaving Effectiveness: Demand vs Battery vs Dynamic Monthly Targets")
+    
+    # Display filtering status info (updated for always-visible Level 2)
+    level2_active = ('specific_day_filter' in st.session_state and 
+                    st.session_state.get('specific_day_filter', '').strip() and 
+                    not st.session_state.get('specific_day_filter', '').startswith("All "))
+    
+    if level2_active:
+        specific_day = st.session_state.get('specific_day_filter', '')
+        st.info(f"🆕 **V2 Enhancement with Two-Level Filtering**: Target line changes monthly based on V2 configuration, showing **{selected_filter}** filtered to **{specific_day}**")
+    elif selected_filter != "All Days":
+        st.info(f"🆕 **V2 Enhancement with Level 1 Filtering**: Target line changes monthly based on V2 configuration, showing only **{selected_filter.lower()}**")
+    else:
+        st.info("🆕 **V2 Enhancement**: Target line changes monthly based on your V2 target configuration")
+    
+    fig = go.Figure()
+    
+    # Add demand lines
+    fig.add_trace(
+        go.Scatter(x=df_filtered.index, y=df_filtered[net_col], 
+                  name='Net Demand (with Battery)', line=dict(color='#00BFFF', width=2),
+                  hovertemplate='Net: %{y:.1f} kW<br>%{x}<extra></extra>')
     )
     
-    # Panel 1: Original demand vs targets
-    fig.add_trace(go.Scatter(
-        x=df_filtered.index,
-        y=df_filtered['Original_Demand'],
-        mode='lines',
-        name='Original Demand',
-        line=dict(color='red', width=2)
-    ), row=1, col=1)
+    # V2 ENHANCEMENT: Add stepped monthly target line instead of static line
+    fig.add_trace(
+        go.Scatter(x=df_filtered.index, y=target_series, 
+                  name='Monthly Target (V2 Dynamic)', 
+                  line=dict(color='green', dash='dash', width=3),
+                  hovertemplate='Monthly Target: %{y:.1f} kW<br>%{x}<extra></extra>')
+    )
     
-    fig.add_trace(go.Scatter(
-        x=df_filtered.index,
-        y=df_filtered['Monthly_Target'],
-        mode='lines',
-        name='Monthly Target',
-        line=dict(color='orange', width=2, dash='dash')
-    ), row=1, col=1)
+    # Replace area fills with bar charts for battery discharge/charge
+    discharge_series = df_filtered['Battery_Power_kW'].where(df_filtered['Battery_Power_kW'] > 0, other=0)
+    charge_series = df_filtered['Battery_Power_kW'].where(df_filtered['Battery_Power_kW'] < 0, other=0)
     
-    # Panel 2: Net demand
-    fig.add_trace(go.Scatter(
-        x=df_filtered.index,
-        y=df_filtered['Net_Demand'],
-        mode='lines',
-        name='Net Demand',
-        line=dict(color='blue', width=2)
-    ), row=2, col=1)
-    
-    fig.add_trace(go.Scatter(
-        x=df_filtered.index,
-        y=df_filtered['Monthly_Target'],
-        mode='lines',
-        name='Monthly Target',
-        line=dict(color='orange', width=1, dash='dash'),
-        showlegend=False
-    ), row=2, col=1)
-    
-    # Panel 3: Battery power
-    colors = ['red' if p > 0 else 'green' if p < 0 else 'gray' for p in df_filtered['Battery_Power']]
-    fig.add_trace(go.Scatter(
-        x=df_filtered.index,
-        y=df_filtered['Battery_Power'],
-        mode='markers',
-        name='Battery Power',
-        marker=dict(color=colors, size=3),
-        hovertemplate='Battery Power: %{y:.1f} kW<br>%{x}<extra></extra>'
-    ), row=3, col=1)
-    
-    # Panel 4: SOC
-    fig.add_trace(go.Scatter(
-        x=df_filtered.index,
-        y=df_filtered['SOC_Percent'],
-        mode='lines',
-        name='SOC %',
-        line=dict(color='purple', width=2),
-        fill='tonexty'
-    ), row=4, col=1)
-    
-    # Panel 5: Daily performance (simplified)
-    daily_stats = df_filtered.groupby(df_filtered.index.date).agg({
-        'Original_Demand': 'max',
-        'Net_Demand': 'max',
-        'Monthly_Target': 'first'
-    })
-    daily_stats['Peak_Reduction'] = daily_stats['Original_Demand'] - daily_stats['Net_Demand']
-    
+    # Discharge bars
     fig.add_trace(go.Bar(
-        x=daily_stats.index,
-        y=daily_stats['Peak_Reduction'],
-        name='Daily Peak Reduction',
-        marker_color='green'
-    ), row=5, col=1)
+        x=df_filtered.index,
+        y=discharge_series,
+        name='Battery Discharge (kW)',
+        marker=dict(color='orange'),
+        opacity=0.6,
+        hovertemplate='Discharge: %{y:.1f} kW<br>%{x}<extra></extra>',
+        yaxis='y2'
+    ))
     
-    # Update layout
-    fig.update_layout(
-        height=1200,
-        title=f"V2 Battery Simulation Results ({selected_filter})",
-        showlegend=True
+    # Charge bars (negative values)
+    fig.add_trace(go.Bar(
+        x=df_filtered.index,
+        y=charge_series,
+        name='Battery Charge (kW)',
+        marker=dict(color='green'),
+        opacity=0.6,
+        hovertemplate='Charge: %{y:.1f} kW<br>%{x}<extra></extra>',
+        yaxis='y2'
+    ))
+    
+    # V2 ENHANCEMENT: Add dynamic conditional coloring using monthly targets instead of static average
+    # This replaces the V1 averaging approach with dynamic monthly target-based coloring
+    fig = _create_v2_conditional_demand_line_with_dynamic_targets(
+        fig, df_filtered, 'Original_Demand', target_series, selected_tariff, holidays, "Original Demand"
     )
     
-    # Y-axis labels
-    fig.update_yaxes(title_text="Power (kW)", row=1, col=1)
-    fig.update_yaxes(title_text="Power (kW)", row=2, col=1)
-    fig.update_yaxes(title_text="Power (kW)", row=3, col=1)
-    fig.update_yaxes(title_text="SOC (%)", row=4, col=1)
-    fig.update_yaxes(title_text="Reduction (kW)", row=5, col=1)
+    # Compute symmetric range for y2 to show positive/negative bars
+    try:
+        max_abs_power = float(df_filtered['Battery_Power_kW'].abs().max())
+    except Exception:
+        max_abs_power = float(sizing.get('power_rating_kw', 100))
+    y2_limit = max(max_abs_power * 1.1, sizing.get('power_rating_kw', 100) * 0.5)
+    
+    fig.update_layout(
+        title='🎯 V2 MD Shaving Effectiveness: Demand vs Battery vs Dynamic Monthly Targets',
+        xaxis_title='Time',
+        yaxis_title='Power Demand (kW)',
+        yaxis2=dict(
+            title='Battery Power (kW) [+ discharge | - charge]',
+            overlaying='y',
+            side='right',
+            range=[-y2_limit, y2_limit],
+            zeroline=True,
+            zerolinecolor='gray'
+        ),
+        height=500,
+        hovermode='x unified',
+        legend=dict(
+            orientation="h",
+            yanchor="top", 
+            y=-0.15,
+            xanchor="center", 
+            x=0.5
+        ),
+        margin=dict(b=100),
+        barmode='overlay',
+        template="none",
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)'
+    )
     
     st.plotly_chart(fig, use_container_width=True)
     
-    # Summary stats
-    st.markdown("#### 📈 Simulation Summary")
+    # V2 ENHANCEMENT INFO: Add explanation about dynamic color coding
+    st.info("""
+    🆕 **V2 Color Coding Enhancement**: The colored line segments now use **dynamic monthly targets** instead of a static average target.
+    - **Blue segments**: Below monthly target (acceptable levels)
+    - **Green segments**: Above monthly target during off-peak periods (energy cost only)
+    - **Red segments**: Above monthly target during peak periods (energy + MD cost impact)
+    
+    This provides more accurate visual feedback about when intervention is needed based on realistic monthly billing patterns.
+    """)
+    
+    # ===== V2 SUMMARY METRICS =====
+    # Get dynamic interval hours for energy calculations
+    interval_hours = _get_dynamic_interval_hours(df_filtered)
+    
+    # Calculate basic metrics
+    total_energy_discharged = df_filtered['Battery_Power_kW'].where(df_filtered['Battery_Power_kW'] > 0, 0).sum() * interval_hours
+    total_energy_charged = abs(df_filtered['Battery_Power_kW'].where(df_filtered['Battery_Power_kW'] < 0, 0).sum()) * interval_hours
+    success_rate = len([s for s in df_filtered['Shaving_Success'] if '✅' in s]) / len(df_filtered) * 100
+    
+    # Display key metrics
     col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Energy Discharged", f"{total_energy_discharged:.1f} kWh")
+    col2.metric("Energy Charged", f"{total_energy_charged:.1f} kWh")
+    col3.metric("Success Rate", f"{success_rate:.1f}%")
+    col4.metric("Avg SOC", f"{df_filtered['Battery_SOC_Percent'].mean():.1f}%")
     
-    with col1:
-        avg_reduction = daily_stats['Peak_Reduction'].mean()
-        st.metric("Avg Daily Peak Reduction", f"{avg_reduction:.1f} kW")
+    # Panel 2: Combined SOC and Battery Power Chart (same as V1)
+    st.markdown("##### 2️⃣ Combined SOC and Battery Power Chart")
     
-    with col2:
-        success_rate = len([s for s in df_filtered['Shaving_Success'] if '✅' in s]) / len(df_filtered) * 100
-        st.metric("Success Rate", f"{success_rate:.1f}%")
+    fig2 = make_subplots(specs=[[{"secondary_y": True}]])
     
-    with col3:
-        avg_soc = df_filtered['SOC_Percent'].mean()
-        st.metric("Average SOC", f"{avg_soc:.1f}%")
+    # SOC line (left y-axis)
+    fig2.add_trace(
+        go.Scatter(x=df_filtered.index, y=df_filtered['Battery_SOC_Percent'],
+                  name='SOC (%)', line=dict(color='purple', width=2),
+                  hovertemplate='SOC: %{y:.1f}%<br>%{x}<extra></extra>'),
+        secondary_y=False
+    )
     
-    with col4:
-        total_cycles = (df_filtered['Battery_Power'].abs().sum() * 0.25) / (sizing['capacity_kwh'] * 2) if sizing else 0
-        st.metric("Est. Total Cycles", f"{total_cycles:.2f}")             
+    # Battery power line (right y-axis) 
+    fig2.add_trace(
+        go.Scatter(x=df_filtered.index, y=df_filtered['Battery_Power_kW'],
+                  name='Battery Power', line=dict(color='orange', width=2),
+                  hovertemplate='Power: %{y:.1f} kW<br>%{x}<extra></extra>'),
+        secondary_y=True
+    )
+    
+    # Add horizontal line for minimum SOC warning (updated to 10% based on 5% safety limit)
+    fig2.add_hline(y=10, line_dash="dot", line_color="red", 
+                   annotation_text="Low SOC Warning (10% - 5% Safety Limit)", secondary_y=False)
+    
+    # Update axes
+    fig2.update_xaxes(title_text="Time")
+    fig2.update_yaxes(title_text="State of Charge (%)", secondary_y=False, range=[0, 100])
+    fig2.update_yaxes(title_text="Battery Discharge Power (kW)", secondary_y=True)
+    
+    fig2.update_layout(
+        title='⚡ SOC vs Battery Power: Timing Analysis',
+        height=400,
+        hovermode='x unified',
+        template="none",
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)'
+    )
+    
+    st.plotly_chart(fig2, use_container_width=True)
+    
+    # Panel 3: Battery Power Utilization Heatmap (same as V1)
+    st.markdown("##### 3️⃣ Battery Power Utilization Heatmap")
+    
+    # Prepare data for heatmap
+    df_heatmap = df_filtered.copy()
+    df_heatmap['Date'] = df_heatmap.index.date
+    df_heatmap['Hour'] = df_heatmap.index.hour
+    df_heatmap['Battery_Utilization_%'] = (df_heatmap['Battery_Power_kW'] / sizing['power_rating_kw'] * 100).clip(0, 100)
+    
+    # Create pivot table for heatmap
+    heatmap_data = df_heatmap.pivot_table(
+        values='Battery_Utilization_%', 
+        index='Hour', 
+        columns='Date', 
+        aggfunc='mean',
+        fill_value=0
+    )
+    
+    # Create heatmap
+    fig3 = go.Figure(data=go.Heatmap(
+        z=heatmap_data.values,
+        x=[str(d) for d in heatmap_data.columns],
+        y=heatmap_data.index,
+        colorscale='Viridis',
+        hoverongaps=False,
+        hovertemplate='Date: %{x}<br>Hour: %{y}<br>Utilization: %{z:.1f}%<extra></extra>',
+        colorbar=dict(title="Battery Utilization (%)")
+    ))
+    
+    fig3.update_layout(
+        title='🔥 Battery Power Utilization Heatmap (% of Rated Power)',
+        xaxis_title='Date',
+        yaxis_title='Hour of Day',
+        height=400,
+        template="none",
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)'
+    )
+    
+    st.plotly_chart(fig3, use_container_width=True)
+    
+    # V2 Key insights with monthly target context
+    st.markdown("##### 🔍 V2 Key Insights from Enhanced Monthly Target Analysis")
+    
+    insights = []
+    
+    # Use V2 energy efficiency calculation
+    energy_efficiency = (total_energy_discharged / max(total_energy_charged, 1) * 100)
+        
+    if energy_efficiency < 80:
+        insights.append("⚠️ **V2 MD Energy Shortfall**: Battery capacity may be insufficient for complete monthly target-based MD peak shaving")
+    elif energy_efficiency >= 95:
+        insights.append("✅ **Excellent V2 MD Coverage**: Battery effectively handles all monthly target energy requirements")
+    
+    # Check V2 success rate
+    if success_rate > 90:
+        insights.append("✅ **High V2 Success Rate**: Battery effectively manages most peak events against dynamic monthly targets")
+    elif success_rate < 60:
+        insights.append("❌ **Low V2 Success Rate**: Consider increasing battery power rating or capacity for better monthly target management")
+    
+    # Check battery utilization if heatmap data is available
+    if len(df_heatmap) > 0:
+        avg_utilization = df_heatmap['Battery_Utilization_%'].mean()
+        if avg_utilization < 30:
+            insights.append("📊 **Under-utilized**: Battery power rating may be oversized for V2 monthly targets")
+        elif avg_utilization > 80:
+            insights.append("🔥 **High Utilization**: Battery operating near maximum capacity for V2 monthly targets")
+    
+    # Check for low SOC events (updated to 10% warning threshold based on 5% safety limit)
+    low_soc_events = len(df_filtered[df_filtered['Battery_SOC_Percent'] < 10])
+    if low_soc_events > 0:
+        insights.append(f"🔋 **Low SOC Warning**: {low_soc_events} intervals with SOC below 10% during V2 operation (5% safety limit)")
+    
+    # Add insight about V2 methodology
+    if len(monthly_targets) > 0:
+        insights.append(f"📊 **V2 Innovation**: Analysis uses {len(monthly_targets)} dynamic monthly targets vs traditional static targets for superior accuracy")
+        insights.append(f"🎨 **V2 Color Enhancement**: Line color coding now reflects dynamic monthly targets instead of static averaging - providing month-specific intervention guidance")
+    
+    if not insights:
+        insights.append("✅ **Optimal V2 Performance**: Battery system operating within acceptable parameters with monthly targets")
+    
+    for insight in insights:
+        st.info(insight)             
