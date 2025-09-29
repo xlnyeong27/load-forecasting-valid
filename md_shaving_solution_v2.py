@@ -3372,15 +3372,29 @@ error_10min = forecast_10min - actual_value
                         
                         # Determine data source based on forecast mode
                         if enable_forecasting and forecast_data_available:
-                            # Use forecast data
-                            simulation_data = st.session_state['shaving_forecast_data']['full_data']
-                            # Use P50 forecast as the main power column for simulation
-                            power_column = 'forecast_p50'
-                            st.success("🔮 **Running simulation with P50 forecast data**")
-                            data_ready = True
+                            # Use forecast data - FIXED: Ensure proper timestamp format
+                            forecast_full_data = st.session_state['shaving_forecast_data']['full_data']
                             
+                            # FIXED: Convert forecast data to proper format for battery simulation
+                            if 't' in forecast_full_data.columns and 'forecast_p50' in forecast_full_data.columns:
+                                # Create a proper DataFrame with datetime index and power column
+                                simulation_data = pd.DataFrame({
+                                    'forecast_p50': forecast_full_data['forecast_p50'].values
+                                }, index=pd.to_datetime(forecast_full_data['t']))
+                                
+                                # Ensure the index is a proper DatetimeIndex
+                                simulation_data.index = pd.to_datetime(simulation_data.index)
+                                simulation_data.index.name = None  # Remove index name to match historical format
+                                
+                                power_column = 'forecast_p50'
+                                st.success("🔮 **Running simulation with P50 forecast data** (timestamps aligned)")
+                                data_ready = True
+                            else:
+                                st.error("❌ Forecast data missing required columns ('t' and 'forecast_p50')")
+                                data_ready = False
+                                
                         elif not enable_forecasting and 'shaving_historical_data' in st.session_state:
-                            # Use historical data
+                            # Use historical data - already in correct format
                             simulation_data = st.session_state['df_processed']
                             power_column = st.session_state.get('v2_power_col', simulation_data.columns[0])
                             st.success("📊 **Running simulation with historical data**")
@@ -9371,8 +9385,28 @@ def _create_v2_dynamic_target_series(simulation_index, monthly_targets):
     target_series = pd.Series(index=simulation_index, dtype=float)
     
     for timestamp in simulation_index:
+        # FIXED: Ensure timestamp is a pandas Timestamp object
+        if not isinstance(timestamp, pd.Timestamp):
+            try:
+                timestamp = pd.to_datetime(timestamp)
+            except Exception as e:
+                try:
+                    import streamlit as st
+                    st.warning(f"Could not convert timestamp {timestamp} to datetime: {e}")
+                except ImportError:
+                    print(f"Could not convert timestamp {timestamp} to datetime: {e}")
+                continue
+        
         # Get the month period for this timestamp
-        month_period = timestamp.to_period('M')
+        try:
+            month_period = timestamp.to_period('M')
+        except Exception as e:
+            try:
+                import streamlit as st
+                st.warning(f"Could not convert timestamp {timestamp} to period: {e}")
+            except ImportError:
+                print(f"Could not convert timestamp {timestamp} to period: {e}")
+            continue
         
         # Find the corresponding monthly target
         if month_period in monthly_targets.index:
@@ -9383,7 +9417,7 @@ def _create_v2_dynamic_target_series(simulation_index, monthly_targets):
             if available_months:
                 # Find the closest month
                 closest_month = min(available_months, 
-                                  key=lambda m: abs((timestamp.to_period('M') - m).n))
+                                  key=lambda m: abs((month_period - m).n))
                 target_series.loc[timestamp] = monthly_targets.loc[closest_month]
             else:
                 # Ultimate fallback
