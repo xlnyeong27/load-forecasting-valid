@@ -3394,7 +3394,7 @@ error_10min = forecast_10min - actual_value
                                 data_ready = False
                                 
                         elif not enable_forecasting and 'shaving_historical_data' in st.session_state:
-                            # Use historical data - already in correct format
+                            # Use historical data
                             simulation_data = st.session_state['df_processed']
                             power_column = st.session_state.get('v2_power_col', simulation_data.columns[0])
                             st.success("📊 **Running simulation with historical data**")
