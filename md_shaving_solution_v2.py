@@ -1730,6 +1730,11 @@ def _render_v2_battery_controls():
         battery_power_kw = active_battery_spec.get('power_kW', 0)
         battery_energy_kwh = active_battery_spec.get('energy_kWh', 0)
         
+        # Initialize variables that will be needed later
+        total_power_capacity = 0
+        total_energy_capacity = 0
+        overall_coverage = 0
+        
         if battery_power_kw > 0 and battery_energy_kwh > 0:
             # Calculate recommended quantities
             # Power-based quantity: ceiling(Max Power Required / Battery Power Rating)
@@ -1914,11 +1919,11 @@ def _render_v2_battery_controls():
         st.warning("⚠️ Battery specifications incomplete for quantity configuration")
         run_analysis = False
     
-    # Return the selected battery configuration
+    # Return the selected battery configuration with consistent key names
     battery_config = {
         'selection_method': 'By Specific Model',
         'selected_capacity': selected_capacity if 'selected_capacity' in locals() else default_cap,
-        'active_battery_spec': active_battery_spec,
+        'active_battery_spec': active_battery_spec if 'active_battery_spec' in locals() else {},
         'selected_quantity': st.session_state.get('battery_quantity', default_qty),
         'total_power_capacity': total_power_capacity if 'total_power_capacity' in locals() else 0,
         'total_energy_capacity': total_energy_capacity if 'total_energy_capacity' in locals() else 0,
@@ -3386,7 +3391,7 @@ error_10min = forecast_10min - actual_value
                                 simulation_data.index = pd.to_datetime(simulation_data.index)
                                 simulation_data.index.name = None  # Remove index name to match historical format
                                 
-                                power_column = 'forecast_p50'
+                                power_col = 'forecast_p50'
                                 st.success("🔮 **Running simulation with P50 forecast data** (timestamps aligned)")
                                 data_ready = True
                             else:
@@ -3396,7 +3401,7 @@ error_10min = forecast_10min - actual_value
                         elif not enable_forecasting and 'shaving_historical_data' in st.session_state:
                             # Use historical data
                             simulation_data = st.session_state['df_processed']
-                            power_column = st.session_state.get('v2_power_col', simulation_data.columns[0])
+                            power_col = st.session_state.get('v2_power_col', simulation_data.columns[0])
                             st.success("📊 **Running simulation with historical data**")
                             data_ready = True
                             
@@ -3414,28 +3419,41 @@ error_10min = forecast_10min - actual_value
                                     monthly_targets = None
                                 
                                 if monthly_targets is not None:
-                                    # Extract battery parameters from battery_config
+                                    # Extract battery parameters from battery_config with corrected key names
                                     battery_sizing = {
-                                        'capacity_kwh': battery_config.get('capacity_kwh', 100),
-                                        'power_rating_kw': battery_config.get('power_kw', 100)
+                                        'capacity_kwh': battery_config.get('total_energy_capacity', 100),
+                                        'power_rating_kw': battery_config.get('total_power_capacity', 100)
                                     }
                                     
                                     battery_params = {
-                                        'round_trip_efficiency': battery_config.get('efficiency', 85),
-                                        'depth_of_discharge': battery_config.get('dod', 85)
+                                        'round_trip_efficiency': 95,  # Default efficiency
+                                        'depth_of_discharge': 85      # Default DoD
                                     }
                                     
-                                    # Set up simulation parameters
+                                    # Set up simulation parameters - ensure all variables are defined for both modes
                                     interval_hours = 0.25  # 15-minute intervals
                                     selected_tariff = st.session_state.get('selected_tariff_dict')
                                     holidays = st.session_state.get('holidays', set())
+                                    
+                                    # Ensure session state variables are set for forecast mode compatibility
+                                    if enable_forecasting:
+                                        if not hasattr(st.session_state, 'tabled_analysis_selected_battery'):
+                                            if battery_config and battery_config.get('active_battery_spec'):
+                                                st.session_state.tabled_analysis_selected_battery = {
+                                                    'spec': battery_config['active_battery_spec'],
+                                                    'label': 'Selected Battery'
+                                                }
+                                        
+                                        if not hasattr(st.session_state, 'tabled_analysis_battery_quantity'):
+                                            if battery_config:
+                                                st.session_state.tabled_analysis_battery_quantity = battery_config.get('selected_quantity', 1)
                                     
                                     # Run the battery simulation
                                     st.markdown("### 🔄 Running Battery Operation Simulation...")
                                     with st.spinner("Simulating battery operation..."):
                                         simulation_results = _simulate_battery_operation_v2(
                                             df=simulation_data,
-                                            power_col=power_column,
+                                            power_col=power_col,
                                             monthly_targets=monthly_targets,
                                             battery_sizing=battery_sizing,
                                             battery_params=battery_params,
@@ -3470,10 +3488,28 @@ error_10min = forecast_10min - actual_value
                                         
                                         # Display the comprehensive battery simulation chart
                                         st.markdown("### 📊 Interactive Battery Operation Analysis")
+                                        
+                                        # Prepare proper sizing dictionary for chart display
+                                        if hasattr(st.session_state, 'tabled_analysis_selected_battery'):
+                                            selected_battery = st.session_state.tabled_analysis_selected_battery
+                                            battery_spec = selected_battery['spec']
+                                            quantity = getattr(st.session_state, 'tabled_analysis_battery_quantity', 1)
+                                            
+                                            sizing_for_chart = {
+                                                'power_rating_kw': battery_spec.get('power_kW', 100) * quantity,
+                                                'capacity_kwh': battery_spec.get('energy_kWh', 100) * quantity
+                                            }
+                                        else:
+                                            # Fallback sizing from battery_sizing
+                                            sizing_for_chart = {
+                                                'power_rating_kw': battery_sizing.get('power_rating_kw', 100),
+                                                'capacity_kwh': battery_sizing.get('capacity_kwh', 100)
+                                            }
+                                        
                                         _display_v2_battery_simulation_chart(
                                             df_sim=df_sim,
                                             monthly_targets=monthly_targets,
-                                            sizing=battery_sizing,
+                                            sizing=sizing_for_chart,
                                             selected_tariff=selected_tariff,
                                             holidays=holidays
                                         )
