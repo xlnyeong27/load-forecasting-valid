@@ -3509,6 +3509,78 @@ error_10min = forecast_10min - actual_value
                                                 'capacity_kwh': battery_sizing.get('capacity_kwh', 100)
                                             }
                                         
+                                        # 🔍 DEBUG: Data Structure Analysis for df_sim
+                                        st.markdown("---")
+                                        st.markdown("### 🔍 **DEBUG - df_sim Data Structure Analysis**")
+                                        
+                                        if df_sim is not None:
+                                            col1, col2 = st.columns(2)
+                                            
+                                            with col1:
+                                                st.markdown("**📊 Basic Info:**")
+                                                st.write(f"• **Shape**: {df_sim.shape}")
+                                                st.write(f"• **Index Type**: {type(df_sim.index).__name__}")
+                                                st.write(f"• **Index Range**: {df_sim.index[0]} to {df_sim.index[-1]}")
+                                                st.write(f"• **Memory Usage**: {df_sim.memory_usage(deep=True).sum() / 1024:.1f} KB")
+                                                
+                                            with col2:
+                                                st.markdown("**📝 Column Analysis:**")
+                                                st.write(f"• **Total Columns**: {len(df_sim.columns)}")
+                                                st.write("• **Column Names**:")
+                                                for i, col in enumerate(df_sim.columns, 1):
+                                                    st.write(f"  {i}. `{col}` ({df_sim[col].dtype})")
+                                            
+                                            st.markdown("**🎯 Required Columns Check:**")
+                                            required_cols = ['Original_Demand', 'Battery_Power_kW', 'Battery_SOC_Percent', 'Net_Demand_kW']
+                                            col_status = []
+                                            for col in required_cols:
+                                                if col in df_sim.columns:
+                                                    col_status.append(f"✅ `{col}` - Present")
+                                                else:
+                                                    col_status.append(f"❌ `{col}` - **Missing**")
+                                            
+                                            for status in col_status:
+                                                st.write(status)
+                                            
+                                            st.markdown("**📈 Data Sample (First 3 rows):**")
+                                            st.dataframe(df_sim.head(3), use_container_width=True)
+                                            
+                                            st.markdown("**🔢 Data Statistics:**")
+                                            numeric_cols = df_sim.select_dtypes(include=['number']).columns
+                                            if len(numeric_cols) > 0:
+                                                stats_df = df_sim[numeric_cols].describe().round(2)
+                                                st.dataframe(stats_df, use_container_width=True)
+                                            else:
+                                                st.write("No numeric columns found")
+                                                
+                                            # Check for any potential Series ambiguity issues
+                                            st.markdown("**⚠️ Potential Issues Check:**")
+                                            issue_count = 0
+                                            
+                                            # Check for empty columns
+                                            empty_cols = [col for col in df_sim.columns if df_sim[col].isna().all()]
+                                            if empty_cols:
+                                                st.warning(f"Empty columns detected: {empty_cols}")
+                                                issue_count += 1
+                                            
+                                            # Check for object columns that might cause issues
+                                            object_cols = df_sim.select_dtypes(include=['object']).columns.tolist()
+                                            if object_cols:
+                                                st.info(f"Object/String columns: {object_cols}")
+                                            
+                                            # Check index issues
+                                            if not isinstance(df_sim.index, pd.DatetimeIndex):
+                                                st.warning(f"Index is not DatetimeIndex: {type(df_sim.index)}")
+                                                issue_count += 1
+                                            
+                                            if issue_count == 0:
+                                                st.success("✅ No obvious structural issues detected")
+                                        else:
+                                            st.error("❌ df_sim is None - No data to analyze")
+                                        
+                                        st.markdown("---")
+                                        st.markdown("### 📊 **V2 Battery Operation Visualization**")
+                                        
                                         _display_v2_battery_simulation_chart(
                                             df_sim=df_sim,
                                             monthly_targets=monthly_targets,
