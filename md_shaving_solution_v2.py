@@ -3205,10 +3205,13 @@ error_10min = forecast_10min - actual_value
                                 p50_data = None 
                                 p90_data = None
                                 
-                                # Check if forecast data exists in session state
+                                # Check if forecast data exists in session state (with Series ambiguity protection)
                                 if 'roc_long_format' in st.session_state:
                                     forecast_df = st.session_state['roc_long_format']
-                                    if 'forecast_p10' in forecast_df.columns and 'forecast_p50' in forecast_df.columns and 'forecast_p90' in forecast_df.columns:
+                                    # Safe column checking to prevent Series ambiguity
+                                    required_cols = ['forecast_p10', 'forecast_p50', 'forecast_p90']
+                                    has_all_cols = all(col in forecast_df.columns for col in required_cols)
+                                    if has_all_cols and len(forecast_df) > 0:
                                         forecast_data_available = True
                                         p10_data = forecast_df[['t', 'actual', 'forecast_p10']].copy()
                                         p50_data = forecast_df[['t', 'actual', 'forecast_p50']].copy()
