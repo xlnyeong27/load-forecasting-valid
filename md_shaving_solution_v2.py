@@ -44,6 +44,54 @@ from tariffs.peak_logic import (
 )
 
 
+def debug_forecast_data_structure():
+    """
+    Debug function to examine forecast data structure in session state
+    
+    Returns:
+        DataFrame or None: The forecast data if available
+    """
+    if 'roc_long_format' in st.session_state:
+        forecast_df = st.session_state['roc_long_format']
+        st.markdown("### 🔍 **Forecast Data Structure Analysis**")
+        
+        # Basic info
+        with st.expander("📊 **Data Shape & Info**", expanded=True):
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Rows", f"{forecast_df.shape[0]:,}")
+                st.metric("Columns", forecast_df.shape[1])
+            with col2:
+                if hasattr(forecast_df.index, 'name'):
+                    st.write(f"**Index**: {forecast_df.index.name}")
+                st.write(f"**Index Type**: {type(forecast_df.index).__name__}")
+        
+        # Column analysis
+        with st.expander("🏷️ **Column Details**"):
+            st.write("**Available Columns:**")
+            for col in forecast_df.columns:
+                col_type = forecast_df[col].dtype
+                non_null = forecast_df[col].count()
+                st.write(f"- `{col}` ({col_type}) - {non_null:,} non-null values")
+        
+        # Sample data
+        with st.expander("📋 **Sample Data (First 5 rows)**"):
+            st.dataframe(forecast_df.head())
+            
+        # Data range info
+        if 't' in forecast_df.columns:
+            with st.expander("📅 **Time Range**"):
+                time_col = pd.to_datetime(forecast_df['t'])
+                st.write(f"**Start**: {time_col.min()}")
+                st.write(f"**End**: {time_col.max()}")
+                st.write(f"**Duration**: {time_col.max() - time_col.min()}")
+        
+        return forecast_df
+    else:
+        st.warning("⚠️ No forecast data found in session state")
+        return None
+
+
 def _infer_interval_hours(datetime_index, fallback=0.25):
     """
     Infer sampling interval from datetime index using mode of timestamp differences.
@@ -3380,26 +3428,44 @@ error_10min = forecast_10min - actual_value
                         
                         # Determine data source based on forecast mode
                         if enable_forecasting and forecast_data_available:
-                            # Use forecast data - FIXED: Ensure proper timestamp format
-                            forecast_full_data = st.session_state['shaving_forecast_data']['full_data']
+                            # Debug the original forecast data structure
+                            original_forecast_df = debug_forecast_data_structure()
                             
-                            # FIXED: Convert forecast data to proper format for battery simulation
-                            if 't' in forecast_full_data.columns and 'forecast_p50' in forecast_full_data.columns:
-                                # Create a proper DataFrame with datetime index and power column
-                                simulation_data = pd.DataFrame({
-                                    'forecast_p50': forecast_full_data['forecast_p50'].values
-                                }, index=pd.to_datetime(forecast_full_data['t']))
+                            if original_forecast_df is not None:
+                                # 🔮 SIMPLIFIED FORECAST DATA CONVERSION - Use P50 only
+                                st.markdown("### 🔄 **Converting P50 Forecast Data for MD Shaving**")
                                 
-                                # Ensure the index is a proper DatetimeIndex
-                                simulation_data.index = pd.to_datetime(simulation_data.index)
-                                simulation_data.index.name = None  # Remove index name to match historical format
-                                
-                                power_col = 'forecast_p50'
-                                st.success("🔮 **Running simulation with P50 forecast data** (timestamps aligned)")
-                                data_ready = True
+                                # Check if we have the required forecast columns
+                                if 't' in original_forecast_df.columns and 'forecast_p50' in original_forecast_df.columns:
+                                    # Create simulation data exactly like historical data format
+                                    simulation_data = pd.DataFrame(index=pd.to_datetime(original_forecast_df['t']))
+                                    simulation_data['Active Power Demand (kW)'] = original_forecast_df['forecast_p50'].values
+                                    simulation_data['Original_Demand'] = original_forecast_df['forecast_p50'].values
+                                    
+                                    # Set the power column name to match what MD shaving expects
+                                    power_col = 'Active Power Demand (kW)'
+                                    
+                                    st.success("🔮 **Using P50 forecast data for MD shaving simulation**")
+                                    data_ready = True
+                                    
+                                    # Display conversion summary
+                                    st.info(f"""
+                                    **📊 P50 Forecast Data Conversion Summary:**
+                                    - **Original forecast data**: {original_forecast_df.shape[0]} rows × {original_forecast_df.shape[1]} columns
+                                    - **Converted simulation data**: {simulation_data.shape[0]} rows × {simulation_data.shape[1]} columns
+                                    - **Power column**: `{power_col}` (using forecast_p50 values)
+                                    - **Index**: Datetime index from forecast timestamps
+                                    - **Approach**: Treating P50 forecast exactly like historical demand data
+                                    """)
+                                    
+                                else:
+                                    st.error("❌ Forecast data missing required columns ('t' and 'forecast_p50')")
+                                    data_ready = False
+                                    simulation_data = None
                             else:
-                                st.error("❌ Forecast data missing required columns ('t' and 'forecast_p50')")
+                                st.error("❌ No forecast data available for conversion")
                                 data_ready = False
+                                simulation_data = None
                                 
                         elif not enable_forecasting and 'shaving_historical_data' in st.session_state:
                             # Use historical data
