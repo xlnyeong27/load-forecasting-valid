@@ -9585,9 +9585,10 @@ def _create_v2_dynamic_target_series(simulation_index, monthly_targets):
                 print(f"Could not convert timestamp {timestamp} to period: {e}")
             continue
         
-        # Find the corresponding monthly target
+        # Find the corresponding monthly target - FIXED: Ensure scalar float value
         if month_period in monthly_targets.index:
-            target_series.loc[timestamp] = monthly_targets.loc[month_period]
+            target_value = monthly_targets.loc[month_period]
+            target_series.loc[timestamp] = float(target_value)
         else:
             # Fallback: use the closest available monthly target
             available_months = list(monthly_targets.index)
@@ -9595,7 +9596,8 @@ def _create_v2_dynamic_target_series(simulation_index, monthly_targets):
                 # Find the closest month
                 closest_month = min(available_months, 
                                   key=lambda m: abs((month_period - m).n))
-                target_series.loc[timestamp] = monthly_targets.loc[closest_month]
+                target_value = monthly_targets.loc[closest_month]
+                target_series.loc[timestamp] = float(target_value)
             else:
                 # Ultimate fallback
                 target_series.loc[timestamp] = 1000.0  # Safe default
@@ -9803,11 +9805,11 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
     df_sim['Monthly_Target'] = target_series
     df_sim['Excess_Demand'] = (df_sim[power_col] - df_sim['Monthly_Target']).clip(lower=0)
     
-    # Battery parameters
-    battery_capacity = battery_sizing['capacity_kwh']
-    usable_capacity = battery_capacity * (battery_params['depth_of_discharge'] / 100)
-    max_power = battery_sizing['power_rating_kw']
-    efficiency = battery_params['round_trip_efficiency'] / 100
+    # Battery parameters - FIXED: Ensure all values are scalar floats
+    battery_capacity = float(battery_sizing['capacity_kwh'])
+    usable_capacity = float(battery_capacity * (battery_params['depth_of_discharge'] / 100))
+    max_power = float(battery_sizing['power_rating_kw'])
+    efficiency = float(battery_params['round_trip_efficiency'] / 100)
     
     # Initialize arrays
     soc = np.zeros(len(df_sim))
@@ -9817,14 +9819,15 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
     
     # Main simulation loop
     for i in range(len(df_sim)):
-        current_demand = df_sim[power_col].iloc[i]
-        monthly_target = df_sim['Monthly_Target'].iloc[i]
+        # FIXED: Convert all pandas Series values to scalar floats
+        current_demand = float(df_sim[power_col].iloc[i])
+        monthly_target = float(df_sim['Monthly_Target'].iloc[i])
         excess = max(0, current_demand - monthly_target)
         current_timestamp = df_sim.index[i]
         
-        # Get current SOC
-        current_soc_kwh = soc[i-1] if i > 0 else usable_capacity * 0.80
-        current_soc_percent = (current_soc_kwh / usable_capacity) * 100
+        # Get current SOC - FIXED: Ensure scalar values
+        current_soc_kwh = float(soc[i-1]) if i > 0 else float(usable_capacity * 0.80)
+        current_soc_percent = float((current_soc_kwh / usable_capacity) * 100)
         
         # Discharge logic
         if excess > 0 and is_md_window(current_timestamp, holidays):
@@ -9837,20 +9840,20 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
             )
             max_discharge_power = power_limits['max_discharge_power_kw']
             
-            # Apply all constraints
+            # Apply all constraints - FIXED: Ensure all values are scalar
             required_discharge = min(
-                max_allowable_discharge,
-                max_power,
-                max_discharge_power
+                float(max_allowable_discharge),
+                float(max_power),
+                float(max_discharge_power)
             )
             
             # Check energy availability (5% minimum SOC)
-            min_soc_energy = usable_capacity * 0.05
-            max_discharge_energy = max(0, current_soc_kwh - min_soc_energy)
-            max_discharge_from_energy = max_discharge_energy / interval_hours
+            min_soc_energy = float(usable_capacity * 0.05)
+            max_discharge_energy = max(0, float(current_soc_kwh - min_soc_energy))
+            max_discharge_from_energy = float(max_discharge_energy / interval_hours)
             
-            actual_discharge = min(required_discharge, max_discharge_from_energy)
-            actual_discharge = max(0, actual_discharge)
+            actual_discharge = min(float(required_discharge), float(max_discharge_from_energy))
+            actual_discharge = max(0, float(actual_discharge))
             
             battery_power[i] = actual_discharge
             soc[i] = current_soc_kwh - actual_discharge * interval_hours
@@ -9862,19 +9865,25 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
             
             # Basic charging if demand is low and SOC < 95%
             if current_soc_percent < 95 and current_demand < monthly_target * 0.8:
-                charge_power = min(max_power * 0.3, (usable_capacity * 0.95 - current_soc_kwh) / interval_hours)
+                # FIXED: Ensure all calculations use scalar values
+                remaining_capacity = float(usable_capacity * 0.95 - current_soc_kwh)
+                charge_power = min(
+                    float(max_power * 0.3), 
+                    float(remaining_capacity / interval_hours)
+                )
+                
                 if charge_power > 0:
-                    battery_power[i] = -charge_power
-                    soc[i] = current_soc_kwh + charge_power * interval_hours * efficiency
+                    battery_power[i] = -float(charge_power)
+                    soc[i] = float(current_soc_kwh + charge_power * interval_hours * efficiency)
                     net_demand.iloc[i] = current_demand + charge_power
                 else:
                     net_demand.iloc[i] = current_demand
             else:
                 net_demand.iloc[i] = current_demand
         
-        # Ensure SOC limits
-        soc[i] = max(usable_capacity * 0.05, min(soc[i], usable_capacity * 0.95))
-        soc_percent[i] = (soc[i] / usable_capacity) * 100
+        # Ensure SOC limits - FIXED: All operations use scalar values
+        soc[i] = max(float(usable_capacity * 0.05), min(float(soc[i]), float(usable_capacity * 0.95)))
+        soc_percent[i] = float((soc[i] / usable_capacity) * 100)
     
     # Add results to dataframe
     df_sim['Battery_Power_kW'] = battery_power
@@ -9885,16 +9894,16 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
     # Add shaving success classification for chart compatibility
     df_sim['Shaving_Success'] = df_sim.apply(lambda row: _get_enhanced_shaving_success(row, holidays), axis=1)
     
-    # Calculate metrics
-    total_discharge = sum([p * interval_hours for p in battery_power if p > 0])
-    total_charge = sum([abs(p) * interval_hours for p in battery_power if p < 0])
+    # Calculate metrics - FIXED: Ensure scalar calculations
+    total_discharge = float(sum([p * interval_hours for p in battery_power if p > 0]))
+    total_charge = float(sum([abs(p) * interval_hours for p in battery_power if p < 0]))
     
     return {
         'df_sim': df_sim,
         'total_discharge_kwh': total_discharge,
         'total_charge_kwh': total_charge,
-        'peak_reduction_kw': df_sim['Original_Demand'].max() - df_sim['Net_Demand_kW'].max(),
-        'avg_soc_percent': df_sim['Battery_SOC_Percent'].mean()
+        'peak_reduction_kw': float(df_sim['Original_Demand'].max() - df_sim['Net_Demand_kW'].max()),
+        'avg_soc_percent': float(df_sim['Battery_SOC_Percent'].mean())
     }
 
 
