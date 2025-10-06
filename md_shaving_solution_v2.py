@@ -1893,9 +1893,13 @@ def _render_v2_battery_controls(max_power_shaving_required=None, max_required_en
         battery_company = active_battery_spec.get('company', 'Unknown')
         st.info(f"🔋 **Analysis based on selected battery:** {battery_company} {battery_model} ({battery_energy_kwh}kWh, {battery_power_kw}kW)")
         
-        # Analysis calculations
-        max_power_required = 1734.4  # kW - from requirements analysis
-        max_energy_required = 7884.8  # kWh - from energy analysis
+        # Show data source
+        if max_power_shaving_required is not None and max_required_energy is not None:
+            st.success("📊 **Values sourced from Section 6.5 Battery Sizing Analysis** - Using actual calculated requirements")
+        else:
+            st.warning("⚠️ **Using default values** - Run analysis in Section 6 to get accurate calculations")
+        
+        # Analysis calculations - use dynamic values passed to function
         selected_qty = st.session_state.battery_quantity
         
         # Calculate units needed based on power and energy
