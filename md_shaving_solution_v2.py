@@ -476,6 +476,8 @@ def _generate_monthly_summary_table(all_monthly_events, selected_tariff, holiday
     """
     Generate monthly summary table for Section B2.
     
+    CORRECTED METHODOLOGY: Uses daily clustering as intermediary step to match reference calculations.
+    
     Args:
         all_monthly_events: List of peak events from peak events detection
         selected_tariff: Selected tariff configuration
@@ -483,23 +485,18 @@ def _generate_monthly_summary_table(all_monthly_events, selected_tariff, holiday
         
     Returns:
         pd.DataFrame: Summary table with columns: Month, General/TOU MD Excess (Max kW), 
-                     General/TOU Total Energy Required (kWh Max)
+                     General/TOU Required Energy (Max kWh)
     """
     if not all_monthly_events or len(all_monthly_events) == 0:
         return pd.DataFrame()
     
-    # Group events by month
-    monthly_events = {}
-    for event in all_monthly_events:
-        event_date = event.get('Start Date')
-        if event_date:
-            # Extract year-month (e.g., "2025-01")
-            month_key = event_date.strftime('%Y-%m')
-            if month_key not in monthly_events:
-                monthly_events[month_key] = []
-            monthly_events[month_key].append(event)
+    # STEP 1: Generate daily clustering summary first (intermediary calculation)
+    daily_clustering_df = _generate_clustering_summary_table(all_monthly_events, selected_tariff, holidays)
     
-    # Determine tariff type for MD cost calculation
+    if daily_clustering_df.empty:
+        return pd.DataFrame()
+    
+    # Determine tariff type for column naming
     tariff_type = 'General'  # Default
     if selected_tariff:
         tariff_name = selected_tariff.get('Tariff', '').lower()
@@ -509,36 +506,33 @@ def _generate_monthly_summary_table(all_monthly_events, selected_tariff, holiday
         if 'tou' in tariff_name or 'tou' in tariff_type_field or tariff_type_field == 'tou':
             tariff_type = 'TOU'
     
-    # Create summary data
-    summary_data = []
-    for month_key, events in monthly_events.items():
-        
-        # Calculate MD excess values based on tariff type
-        if tariff_type == 'TOU':
-            # For TOU: Use TOU-specific values
-            md_excess_values = [event.get('TOU Excess (kW)', 0) or 0 for event in events]
-            energy_required_values = [event.get('TOU Required Energy (kWh)', 0) or 0 for event in events]
-        else:
-            # For General: Use General values (24/7 MD impact)
-            md_excess_values = [event.get('General Excess (kW)', 0) or 0 for event in events]
-            energy_required_values = [event.get('General Required Energy (kWh)', 0) or 0 for event in events]
-        
-        # Calculate maximum values for the month
-        max_md_excess_month = max(md_excess_values) if md_excess_values else 0
-        max_energy_required_month = max(energy_required_values) if energy_required_values else 0
-        
-        summary_data.append({
-            'Month': month_key,
-            f'{tariff_type} MD Excess (Max kW)': round(max_md_excess_month, 2),
-            f'{tariff_type} Required Energy (Max kWh)': round(max_energy_required_month, 2)
-        })
+    # STEP 2: Group daily results by month and take maximums
+    # Add month column to daily clustering data
+    daily_clustering_df['Month'] = pd.to_datetime(daily_clustering_df['Date']).dt.strftime('%Y-%m')
     
-    # Create DataFrame and sort by month
-    df_summary = pd.DataFrame(summary_data)
-    if not df_summary.empty:
-        df_summary = df_summary.sort_values('Month')
+    # Define column names based on tariff type
+    md_excess_col = f'{tariff_type} MD Excess (Max kW)'
+    energy_required_col = f'{tariff_type} Total Energy Required (sum kWh)'
     
-    return df_summary
+    # Group by month and calculate maximums from daily values
+    monthly_summary = daily_clustering_df.groupby('Month').agg({
+        md_excess_col: 'max',  # Maximum daily MD excess becomes monthly MD excess
+        energy_required_col: 'max'  # Maximum daily energy required becomes monthly energy required
+    }).reset_index()
+    
+    # Rename energy column to match expected format
+    monthly_summary = monthly_summary.rename(columns={
+        energy_required_col: f'{tariff_type} Required Energy (Max kWh)'
+    })
+    
+    # Round values for display
+    monthly_summary[md_excess_col] = monthly_summary[md_excess_col].round(2)
+    monthly_summary[f'{tariff_type} Required Energy (Max kWh)'] = monthly_summary[f'{tariff_type} Required Energy (Max kWh)'].round(2)
+    
+    # Sort by month
+    monthly_summary = monthly_summary.sort_values('Month')
+    
+    return monthly_summary
 
 
 def build_daily_simulator_structure(df, threshold_kw, clusters_df, selected_tariff=None):
@@ -2440,10 +2434,28 @@ def render_md_shaving_v2():
                     except Exception as e:
                         st.error(f"❌ Error in peak events analysis: {str(e)}")
                     
+                    # Daily Clustering Summary Table (after peak events detection)
+                    try:
+                        if 'peak_events' in locals() and peak_events:
+                            # Generate daily clustering summary table
+                            clustering_summary_df = _generate_clustering_summary_table(
+                                peak_events, selected_tariff, holidays
+                            )
+                            
+                            if not clustering_summary_df.empty:
+                                st.markdown("#### 6.3.1 📊 Daily Clustering Summary")
+                                st.caption("Summary of peak events grouped by date with MD cost impact analysis")
+                                
+                                # Display the daily clustering summary table
+                                st.dataframe(clustering_summary_df, use_container_width=True, hide_index=True)
+                    
+                    except Exception as e:
+                        st.error(f"❌ Error generating daily clustering summary: {str(e)}")
+                    
                     # Monthly Summary Table (after peak events detection)
                     try:
                         if 'peak_events' in locals() and peak_events:
-                            # Generate monthly summary table
+                            # Generate monthly summary table (uses daily clustering as intermediary)
                             monthly_summary_df = _generate_monthly_summary_table(
                                 peak_events, selected_tariff, holidays
                             )
