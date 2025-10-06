@@ -449,6 +449,10 @@ def _generate_clustering_summary_table(all_monthly_events, selected_tariff, holi
             energy_required_values = [event.get('General Required Energy (kWh)', 0) or 0 for event in events]
             max_md_excess = max(md_excess_values) if md_excess_values else 0
         
+        # FILTER: Only include days with non-zero MD Excess values
+        if max_md_excess <= 0:
+            continue  # Skip days with no MD excess
+        
         # Sum total energy required for the date
         total_energy_required = sum(energy_required_values)
         
@@ -2444,7 +2448,7 @@ def render_md_shaving_v2():
                             
                             if not clustering_summary_df.empty:
                                 st.markdown("#### 6.3.1 📊 Daily Clustering Summary")
-                                st.caption("Summary of peak events grouped by date with MD cost impact analysis")
+                                st.caption("Summary of peak events grouped by date with MD cost impact analysis (showing only days with MD excess > 0)")
                                 
                                 # Display the daily clustering summary table
                                 st.dataframe(clustering_summary_df, use_container_width=True, hide_index=True)
