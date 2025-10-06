@@ -30,11 +30,10 @@ from md_shaving_solution import (
     _configure_tariff_selection,
     create_conditional_demand_line_with_peak_logic,
     _detect_peak_events,
+    _detect_peak_events_tou_aware,
     _display_battery_simulation_chart,
     _simulate_battery_operation,
-    _get_tariff_description,
-    get_tnb_holidays_2024_2025,
-    _auto_detect_columns
+    _get_tariff_description
 )
 from tariffs.peak_logic import (
     is_peak_rp4, 
@@ -261,10 +260,12 @@ def get_adaptive_forecast_horizons(series):
 
 def _calculate_tariff_specific_monthly_peaks(df, power_col, selected_tariff, holidays):
     """
-    Calculate monthly peak demands based on tariff type with NaN handling.
+    Calculate monthly peak demands based on tariff type:
+    - General Tariff: Uses 24/7 peak demand (highest demand anytime)
+    - TOU Tariff: Uses peak period demand only (2PM-10PM weekdays)
     
     Args:
-        df: DataFrame with power data (may contain NaN values)
+        df: DataFrame with power data
         power_col: Column name containing power values
         selected_tariff: Selected tariff configuration
         holidays: Set of holiday dates
@@ -282,44 +283,14 @@ def _calculate_tariff_specific_monthly_peaks(df, power_col, selected_tariff, hol
         if 'tou' in tariff_name or 'tou' in tariff_type_field or tariff_type_field == 'tou':
             tariff_type = 'TOU'
     
-    # ENHANCED: Validate and clean data before monthly calculations using DROP method
-    try:
-        df_clean, validation_report = validate_and_clean_data(df[power_col], power_col, fill_method='drop')
-    except Exception as e:
-        # Try to display error if streamlit is available
-        try:
-            import streamlit as st
-            st.error(f"❌ Data validation failed: {str(e)}")
-        except ImportError:
-            print(f"❌ Data validation failed: {str(e)}")
-        return pd.Series(), pd.Series(), tariff_type
-    
-    # Create working dataframe with cleaned data - CRITICAL: preserve only valid timestamps
-    valid_timestamps = df_clean.index
-    df_monthly = df.loc[valid_timestamps].copy()
-    df_monthly[power_col] = df_clean  # Use cleaned data for calculations
+    # Calculate monthly peaks
+    df_monthly = df.copy()
     df_monthly['Month'] = df_monthly.index.to_period('M')
     
-    # Report data quality
-    if validation_report['nan_count'] > 0:
-        # Try to display info if streamlit is available
-        try:
-            import streamlit as st
-            st.info(f"""
-            📊 **Data Quality Report for Monthly Peaks:**
-            - **Original data points**: {validation_report['total_points']:,}
-            - **NaN/null values found**: {validation_report['nan_count']:,} ({validation_report['nan_percentage']:.1f}%)
-            - **Valid data points used**: {len(df_clean):,}
-            - **Data quality**: {validation_report['data_quality']}
-            - **Method**: Dropped NaN values to maintain data integrity
-            """)
-        except ImportError:
-            print(f"Data Quality Report: {validation_report['nan_count']} NaN values dropped from {validation_report['total_points']} total points")
-    
-    # Calculate monthly peaks with NaN-aware aggregation using cleaned data only
+    # General peaks (24/7 maximum demand)
     monthly_general_peaks = df_monthly.groupby('Month')[power_col].max()
     
-    # TOU peaks calculation with enhanced NaN handling
+    # TOU peaks (peak period maximum demand only - 2PM-10PM weekdays)
     monthly_tou_peaks = {}
     
     for month_period in monthly_general_peaks.index:
@@ -329,20 +300,17 @@ def _calculate_tariff_specific_monthly_peaks(df, power_col, selected_tariff, hol
         month_data = df_monthly[month_mask]
         
         if not month_data.empty:
-            # Filter for TOU peak periods only with valid data (no NaN values)
+            # Filter for TOU peak periods only
             tou_peak_data = []
             
             for timestamp in month_data.index:
                 power_value = month_data.loc[timestamp, power_col]
-                # Only include non-NaN values during peak periods
-                if (is_peak_rp4(timestamp, holidays if holidays else set()) and 
-                    pd.notna(power_value)):
+                if is_peak_rp4(timestamp, holidays if holidays else set()):
                     tou_peak_data.append(power_value)
             
             if tou_peak_data:
                 monthly_tou_peaks[month_period] = max(tou_peak_data)
             else:
-                # Use general peak as fallback (already validated non-NaN)
                 monthly_tou_peaks[month_period] = monthly_general_peaks[month_period]
         else:
             monthly_tou_peaks[month_period] = 0
