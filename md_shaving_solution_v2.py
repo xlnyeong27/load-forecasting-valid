@@ -1662,8 +1662,14 @@ def get_battery_options_for_capacity(battery_db, target_capacity, tolerance=5):
     return matching_batteries
 
 
-def _render_v2_battery_controls():
-    """Render battery capacity controls in the main content area (right side)."""
+def _render_v2_battery_controls(max_power_shaving_required=None, max_required_energy=None):
+    """
+    Render battery capacity controls in the main content area (right side).
+    
+    Args:
+        max_power_shaving_required: Maximum power shaving required from analysis (kW)
+        max_required_energy: Maximum required energy from analysis (kWh)
+    """
     
     st.markdown("### 🔋 Battery Configuration")
     st.markdown("**Configure battery specifications for MD shaving analysis.**")
@@ -1732,9 +1738,15 @@ def _render_v2_battery_controls():
         # Battery Quantity Recommendation section
         st.markdown("#### 7.1 🔢 Battery Quantity Recommendation")
         
-        # Default values for demonstration (these would come from actual analysis)
-        max_power_required = 1734.4  # kW - This should come from peak analysis
-        max_energy_required = 7884.8  # kWh - This should come from energy analysis
+        # Use actual calculated values from analysis, fallback to default if not provided
+        max_power_required = max_power_shaving_required if max_power_shaving_required is not None else 1734.4  # kW
+        max_energy_required = max_required_energy if max_required_energy is not None else 7884.8  # kWh
+        
+        # Display source of values
+        if max_power_shaving_required is not None and max_required_energy is not None:
+            st.info("📊 **Values sourced from Section 6.5 Battery Sizing Analysis**")
+        else:
+            st.warning("⚠️ **Using default values** - Run analysis in Section 6 to get accurate calculations")
         
         # Extract battery specifications for calculations
         battery_power_kw = active_battery_spec.get('power_kW', 0)
@@ -1828,9 +1840,6 @@ def _render_v2_battery_controls():
         total_energy_capacity = st.session_state.battery_quantity * battery_energy_kwh
         
         # Calculate coverage percentage (based on max requirements)
-        max_power_required = 1734.4  # kW - from previous calculation
-        max_energy_required = 7884.8  # kWh - from previous calculation
-        
         power_coverage = (total_power_capacity / max_power_required) * 100 if max_power_required > 0 else 0
         energy_coverage = (total_energy_capacity / max_energy_required) * 100 if max_energy_required > 0 else 0
         overall_coverage = min(power_coverage, energy_coverage)  # Limiting factor
@@ -2527,7 +2536,11 @@ def render_md_shaving_v2():
                     # V2 Battery Configuration
                     st.subheader("🔋 V2 Battery Configuration")
                     try:
-                        battery_config = _render_v2_battery_controls()
+                        # Pass calculated values if available, otherwise use None for default behavior
+                        power_shaving_val = max_power_shaving_required if 'max_power_shaving_required' in locals() else None
+                        energy_requirement_val = max_required_energy if 'max_required_energy' in locals() else None
+                        
+                        battery_config = _render_v2_battery_controls(power_shaving_val, energy_requirement_val)
                         
                         if battery_config:
                             st.success("✅ Battery configuration completed!")
