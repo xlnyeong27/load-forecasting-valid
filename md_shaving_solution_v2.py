@@ -2285,16 +2285,14 @@ def render_md_shaving_v2():
                         peak_events = []
                         try:
                             with st.spinner("Detecting peak events..."):
-                                # Use the monthly targets from session state
+                                # Use the monthly targets from session state - MONTH BY MONTH APPROACH
                                 if 'v2_monthly_targets' in st.session_state:
                                     monthly_targets = st.session_state['v2_monthly_targets']
-                                    # Get average target for events detection
-                                    avg_target = monthly_targets.mean()
+                                    all_monthly_events = []
                                     
                                     # Debug information
                                     st.info(f"🔍 **Debug Info:**")
                                     st.write(f"- Monthly targets shape: {monthly_targets.shape}")
-                                    st.write(f"- Average target: {avg_target:.2f} kW")
                                     st.write(f"- Data shape: {df_processed.shape}")
                                     st.write(f"- Power column: {power_col}")
                                     st.write(f"- Detected interval: {detected_interval_hours:.4f} hours")
@@ -2307,15 +2305,26 @@ def render_md_shaving_v2():
                                     
                                     st.write(f"- Total MD rate: {total_md_rate} RM/kW")
                                     
-                                    peak_events = _detect_peak_events(
-                                        df_processed, 
-                                        power_col, 
-                                        avg_target,  # Use average monthly target
-                                        total_md_rate,
-                                        detected_interval_hours,
-                                        selected_tariff
-                                    )
+                                    # Process each month separately (like copy file)
+                                    for month_period, target_value in monthly_targets.items():
+                                        month_start = month_period.start_time
+                                        month_end = month_period.end_time
+                                        month_mask = (df_processed.index >= month_start) & (df_processed.index <= month_end)
+                                        month_data = df_processed[month_mask]
+                                        
+                                        if not month_data.empty:
+                                            # Find peak events for this month using TOU-aware detection
+                                            month_peak_events = _detect_peak_events_tou_aware(
+                                                month_data, power_col, target_value, total_md_rate, detected_interval_hours, selected_tariff, holidays
+                                            )
+                                            
+                                            # Add month info to each event
+                                            for event in month_peak_events:
+                                                event['Month'] = str(month_period)
+                                                event['Monthly_Target'] = target_value
+                                                all_monthly_events.append(event)
                                     
+                                    peak_events = all_monthly_events
                                     st.write(f"- Peak events found: {len(peak_events) if peak_events else 0}")
                                 else:
                                     st.error("❌ Monthly targets not calculated. Please calculate targets first.")
