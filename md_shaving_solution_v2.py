@@ -3523,149 +3523,22 @@ error_10min = forecast_10min - actual_value
                                             if battery_config:
                                                 st.session_state.tabled_analysis_battery_quantity = battery_config.get('selected_quantity', 1)
                                     
-                                    # Run the battery simulation
-                                    st.markdown("### 🔄 Running Battery Operation Simulation...")
-                                    with st.spinner("Simulating battery operation..."):
-                                        simulation_results = _simulate_battery_operation_v2(
-                                            df=simulation_data,
-                                            power_col=power_col,
-                                            monthly_targets=monthly_targets,
-                                            battery_sizing=battery_sizing,
-                                            battery_params=battery_params,
-                                            interval_hours=interval_hours,
-                                            selected_tariff=selected_tariff,
-                                            holidays=holidays
-                                        )
+                                    # Prepare simulation parameters for the new handler function
+                                    simulation_params = {
+                                        'simulation_data': simulation_data,
+                                        'power_col': power_col,
+                                        'monthly_targets': monthly_targets,
+                                        'battery_sizing': battery_sizing,
+                                        'battery_params': battery_params,
+                                        'interval_hours': interval_hours,
+                                        'selected_tariff': selected_tariff,
+                                        'holidays': holidays,
+                                        'enable_forecasting': enable_forecasting,
+                                        'battery_config': battery_config
+                                    }
                                     
-                                    if simulation_results and 'df_sim' in simulation_results:
-                                        st.success("✅ **Battery simulation completed successfully!**")
-                                        
-                                        # Display simulation summary
-                                        df_sim = simulation_results['df_sim']
-                                        
-                                        # Summary metrics
-                                        col1, col2, col3, col4 = st.columns(4)
-                                        with col1:
-                                            total_discharge = df_sim[df_sim['Battery_Power_kW'] > 0]['Battery_Power_kW'].sum() * interval_hours
-                                            st.metric("Total Discharge", f"{total_discharge:.1f} kWh")
-                                            
-                                        with col2:
-                                            total_charge = abs(df_sim[df_sim['Battery_Power_kW'] < 0]['Battery_Power_kW'].sum()) * interval_hours
-                                            st.metric("Total Charge", f"{total_charge:.1f} kWh")
-                                            
-                                        with col3:
-                                            peak_reduction = df_sim['Original_Demand'].max() - df_sim['Net_Demand_kW'].max()
-                                            st.metric("Peak Reduction", f"{peak_reduction:.1f} kW")
-                                            
-                                        with col4:
-                                            avg_soc = df_sim['Battery_SOC_Percent'].mean()
-                                            st.metric("Avg SOC", f"{avg_soc:.1f}%")
-                                        
-                                        # Display the comprehensive battery simulation chart
-                                        st.markdown("### 📊 Interactive Battery Operation Analysis")
-                                        
-                                        # Prepare proper sizing dictionary for chart display
-                                        if hasattr(st.session_state, 'tabled_analysis_selected_battery'):
-                                            selected_battery = st.session_state.tabled_analysis_selected_battery
-                                            battery_spec = selected_battery['spec']
-                                            quantity = getattr(st.session_state, 'tabled_analysis_battery_quantity', 1)
-                                            
-                                            sizing_for_chart = {
-                                                'power_rating_kw': battery_spec.get('power_kW', 100) * quantity,
-                                                'capacity_kwh': battery_spec.get('energy_kWh', 100) * quantity
-                                            }
-                                        else:
-                                            # Fallback sizing from battery_sizing
-                                            sizing_for_chart = {
-                                                'power_rating_kw': battery_sizing.get('power_rating_kw', 100),
-                                                'capacity_kwh': battery_sizing.get('capacity_kwh', 100)
-                                            }
-                                        
-                                        # 🔍 DEBUG: Data Structure Analysis for df_sim
-                                        st.markdown("---")
-                                        st.markdown("### 🔍 **DEBUG - df_sim Data Structure Analysis**")
-                                        
-                                        if df_sim is not None:
-                                            col1, col2 = st.columns(2)
-                                            
-                                            with col1:
-                                                st.markdown("**📊 Basic Info:**")
-                                                st.write(f"• **Shape**: {df_sim.shape}")
-                                                st.write(f"• **Index Type**: {type(df_sim.index).__name__}")
-                                                st.write(f"• **Index Range**: {df_sim.index[0]} to {df_sim.index[-1]}")
-                                                st.write(f"• **Memory Usage**: {df_sim.memory_usage(deep=True).sum() / 1024:.1f} KB")
-                                                
-                                            with col2:
-                                                st.markdown("**📝 Column Analysis:**")
-                                                st.write(f"• **Total Columns**: {len(df_sim.columns)}")
-                                                st.write("• **Column Names**:")
-                                                for i, col in enumerate(df_sim.columns, 1):
-                                                    st.write(f"  {i}. `{col}` ({df_sim[col].dtype})")
-                                            
-                                            st.markdown("**🎯 Required Columns Check:**")
-                                            required_cols = ['Original_Demand', 'Battery_Power_kW', 'Battery_SOC_Percent', 'Net_Demand_kW']
-                                            col_status = []
-                                            for col in required_cols:
-                                                if col in df_sim.columns:
-                                                    col_status.append(f"✅ `{col}` - Present")
-                                                else:
-                                                    col_status.append(f"❌ `{col}` - **Missing**")
-                                            
-                                            for status in col_status:
-                                                st.write(status)
-                                            
-                                            st.markdown("**📈 Data Sample (First 3 rows):**")
-                                            st.dataframe(df_sim.head(3), use_container_width=True)
-                                            
-                                            st.markdown("**🔢 Data Statistics:**")
-                                            numeric_cols = df_sim.select_dtypes(include=['number']).columns
-                                            if len(numeric_cols) > 0:
-                                                stats_df = df_sim[numeric_cols].describe().round(2)
-                                                st.dataframe(stats_df, use_container_width=True)
-                                            else:
-                                                st.write("No numeric columns found")
-                                                
-                                            # Check for any potential Series ambiguity issues
-                                            st.markdown("**⚠️ Potential Issues Check:**")
-                                            issue_count = 0
-                                            
-                                            # Check for empty columns
-                                            empty_cols = [col for col in df_sim.columns if df_sim[col].isna().all()]
-                                            if empty_cols:
-                                                st.warning(f"Empty columns detected: {empty_cols}")
-                                                issue_count += 1
-                                            
-                                            # Check for object columns that might cause issues
-                                            object_cols = df_sim.select_dtypes(include=['object']).columns.tolist()
-                                            if object_cols:
-                                                st.info(f"Object/String columns: {object_cols}")
-                                            
-                                            # Check index issues
-                                            if not isinstance(df_sim.index, pd.DatetimeIndex):
-                                                st.warning(f"Index is not DatetimeIndex: {type(df_sim.index)}")
-                                                issue_count += 1
-                                            
-                                            if issue_count == 0:
-                                                st.success("✅ No obvious structural issues detected")
-                                        else:
-                                            st.error("❌ df_sim is None - No data to analyze")
-                                        
-                                        st.markdown("---")
-                                        st.markdown("### 📊 **V2 Battery Operation Visualization**")
-                                        
-                                        _display_v2_battery_simulation_chart(
-                                            df_sim=df_sim,
-                                            monthly_targets=monthly_targets,
-                                            sizing=sizing_for_chart,
-                                            selected_tariff=selected_tariff,
-                                            holidays=holidays
-                                        )
-                                        
-                                        # Store simulation results for further analysis
-                                        st.session_state['v2_simulation_results'] = simulation_results
-                                        
-                                    else:
-                                        st.error("❌ Battery simulation failed. Please check your configuration.")
+                                    # Call the handler function (defined after _simulate_battery_operation_v2)
+                                    _handle_battery_simulation_workflow(simulation_params)
                                         
                             except Exception as e:
                                 st.error(f"❌ Error during battery simulation: {str(e)}")
@@ -4165,15 +4038,16 @@ def _create_v2_conditional_demand_line_with_dynamic_targets(fig, df, power_col, 
         avg_target = df[power_col].quantile(0.9)
         return create_conditional_demand_line_with_peak_logic(fig, df, power_col, avg_target, selected_tariff, holidays, trace_name)
     
-    # Convert index to datetime if it's not already
-    if not pd.api.types.is_datetime64_any_dtype(df.index):
-        df_copy = df.copy()
-        df_copy.index = pd.to_datetime(df.index)
-    else:
-        df_copy = df
+    # FIXED: Handle datetime index conversion properly
+    df_copy = df.copy()
+    if not pd.api.types.is_datetime64_any_dtype(df_copy.index):
+        try:
+            df_copy.index = pd.to_datetime(df_copy.index)
+        except Exception as e:
+            st.error(f"Error converting index to datetime: {str(e)}")
+            return fig
     
     # Create a series with color classifications using DYNAMIC monthly targets
-    df_copy = df_copy.copy()
     df_copy['color_class'] = ''
     
     for i in range(len(df_copy)):
@@ -4185,17 +4059,21 @@ def _create_v2_conditional_demand_line_with_dynamic_targets(fig, df, power_col, 
             current_target = target_series.loc[timestamp]
         else:
             # Fallback to closest available target
-            month_period = timestamp.to_period('M')
-            available_periods = [t.to_period('M') for t in target_series.index if not pd.isna(target_series.loc[t])]
-            if available_periods:
-                closest_period_timestamp = min(target_series.index, 
-                                             key=lambda t: abs((timestamp - t).total_seconds()))
-                current_target = target_series.loc[closest_period_timestamp]
-            else:
-                current_target = df[power_col].quantile(0.9)  # Safe fallback
+            try:
+                month_period = timestamp.to_period('M')
+                # FIXED: Use .index instead of creating list to avoid Series ambiguity
+                if len(target_series) > 0:
+                    # Find closest timestamp by distance
+                    time_diffs = (target_series.index - timestamp).abs()
+                    closest_idx = time_diffs.idxmin()
+                    current_target = float(target_series.loc[closest_idx])
+                else:
+                    current_target = float(df[power_col].quantile(0.9))  # Safe fallback
+            except Exception:
+                current_target = float(df[power_col].quantile(0.9))  # Safe fallback
         
         # Get MD window classification using RP4 2-period system
-        is_md = is_peak_rp4(timestamp, holidays)
+        is_md = is_peak_rp4(timestamp, holidays if holidays else set())
         period_type = 'Peak' if is_md else 'Off-Peak'
         
         # V2 LOGIC: Color classification using dynamic monthly target
@@ -9911,6 +9789,168 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
         'peak_reduction_kw': float(df_sim['Original_Demand'].max() - df_sim['Net_Demand_kW'].max()),
         'avg_soc_percent': float(df_sim['Battery_SOC_Percent'].mean())
     }
+
+
+def _handle_battery_simulation_workflow(simulation_params):
+    """
+    Handle the complete battery simulation workflow.
+    This function is called after _simulate_battery_operation_v2 is defined to avoid function order issues.
+    """
+    # Extract parameters
+    simulation_data = simulation_params['simulation_data']
+    power_col = simulation_params['power_col']
+    monthly_targets = simulation_params['monthly_targets']
+    battery_sizing = simulation_params['battery_sizing']
+    battery_params = simulation_params['battery_params']
+    interval_hours = simulation_params['interval_hours']
+    selected_tariff = simulation_params['selected_tariff']
+    holidays = simulation_params['holidays']
+    enable_forecasting = simulation_params.get('enable_forecasting', False)
+    battery_config = simulation_params.get('battery_config', {})
+    
+    # Run the battery simulation
+    st.markdown("### 🔄 Running Battery Operation Simulation...")
+    with st.spinner("Simulating battery operation..."):
+        simulation_results = _simulate_battery_operation_v2(
+            df=simulation_data,
+            power_col=power_col,
+            monthly_targets=monthly_targets,
+            battery_sizing=battery_sizing,
+            battery_params=battery_params,
+            interval_hours=interval_hours,
+            selected_tariff=selected_tariff,
+            holidays=holidays
+        )
+    
+    if simulation_results and 'df_sim' in simulation_results:
+        st.success("✅ **Battery simulation completed successfully!**")
+        
+        # Display simulation summary
+        df_sim = simulation_results['df_sim']
+        
+        # Summary metrics
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            total_discharge = df_sim[df_sim['Battery_Power_kW'] > 0]['Battery_Power_kW'].sum() * interval_hours
+            st.metric("Total Discharge", f"{total_discharge:.1f} kWh")
+            
+        with col2:
+            total_charge = abs(df_sim[df_sim['Battery_Power_kW'] < 0]['Battery_Power_kW'].sum()) * interval_hours
+            st.metric("Total Charge", f"{total_charge:.1f} kWh")
+            
+        with col3:
+            peak_reduction = df_sim['Original_Demand'].max() - df_sim['Net_Demand_kW'].max()
+            st.metric("Peak Reduction", f"{peak_reduction:.1f} kW")
+            
+        with col4:
+            avg_soc = df_sim['Battery_SOC_Percent'].mean()
+            st.metric("Avg SOC", f"{avg_soc:.1f}%")
+        
+        # Display the comprehensive battery simulation chart
+        st.markdown("### 📊 Interactive Battery Operation Analysis")
+        
+        # Prepare proper sizing dictionary for chart display
+        if hasattr(st.session_state, 'tabled_analysis_selected_battery'):
+            selected_battery = st.session_state.tabled_analysis_selected_battery
+            battery_spec = selected_battery['spec']
+            quantity = getattr(st.session_state, 'tabled_analysis_battery_quantity', 1)
+            
+            sizing_for_chart = {
+                'power_rating_kw': battery_spec.get('power_kW', 100) * quantity,
+                'capacity_kwh': battery_spec.get('energy_kWh', 100) * quantity
+            }
+        else:
+            # Fallback sizing from battery_sizing
+            sizing_for_chart = {
+                'power_rating_kw': battery_sizing.get('power_rating_kw', 100),
+                'capacity_kwh': battery_sizing.get('capacity_kwh', 100)
+            }
+        
+        # 🔍 DEBUG: Data Structure Analysis for df_sim
+        st.markdown("---")
+        st.markdown("### 🔍 **DEBUG - df_sim Data Structure Analysis**")
+        
+        if df_sim is not None:
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("**📊 Basic Info:**")
+                st.write(f"• **Shape**: {df_sim.shape}")
+                st.write(f"• **Index Type**: {type(df_sim.index).__name__}")
+                st.write(f"• **Index Range**: {df_sim.index[0]} to {df_sim.index[-1]}")
+                st.write(f"• **Memory Usage**: {df_sim.memory_usage(deep=True).sum() / 1024:.1f} KB")
+                
+            with col2:
+                st.markdown("**📝 Column Analysis:**")
+                st.write(f"• **Total Columns**: {len(df_sim.columns)}")
+                st.write("• **Column Names**:")
+                for i, col in enumerate(df_sim.columns, 1):
+                    st.write(f"  {i}. `{col}` ({df_sim[col].dtype})")
+            
+            st.markdown("**🎯 Required Columns Check:**")
+            required_cols = ['Original_Demand', 'Battery_Power_kW', 'Battery_SOC_Percent', 'Net_Demand_kW']
+            col_status = []
+            for col in required_cols:
+                if col in df_sim.columns:
+                    col_status.append(f"✅ `{col}` - Present")
+                else:
+                    col_status.append(f"❌ `{col}` - **Missing**")
+            
+            for status in col_status:
+                st.write(status)
+            
+            st.markdown("**📈 Data Sample (First 3 rows):**")
+            st.dataframe(df_sim.head(3), use_container_width=True)
+            
+            st.markdown("**🔢 Data Statistics:**")
+            numeric_cols = df_sim.select_dtypes(include=['number']).columns
+            if len(numeric_cols) > 0:
+                stats_df = df_sim[numeric_cols].describe().round(2)
+                st.dataframe(stats_df, use_container_width=True)
+            else:
+                st.write("No numeric columns found")
+                
+            # Check for any potential Series ambiguity issues
+            st.markdown("**⚠️ Potential Issues Check:**")
+            issue_count = 0
+            
+            # Check for empty columns
+            empty_cols = [col for col in df_sim.columns if df_sim[col].isna().all()]
+            if empty_cols:
+                st.warning(f"Empty columns detected: {empty_cols}")
+                issue_count += 1
+            
+            # Check for object columns that might cause issues
+            object_cols = df_sim.select_dtypes(include=['object']).columns.tolist()
+            if object_cols:
+                st.info(f"Object/String columns: {object_cols}")
+            
+            # Check index issues
+            if not isinstance(df_sim.index, pd.DatetimeIndex):
+                st.warning(f"Index is not DatetimeIndex: {type(df_sim.index)}")
+                issue_count += 1
+            
+            if issue_count == 0:
+                st.success("✅ No obvious structural issues detected")
+        else:
+            st.error("❌ df_sim is None - No data to analyze")
+        
+        st.markdown("---")
+        st.markdown("### 📊 **V2 Battery Operation Visualization**")
+        
+        _display_v2_battery_simulation_chart(
+            df_sim=df_sim,
+            monthly_targets=monthly_targets,
+            sizing=sizing_for_chart,
+            selected_tariff=selected_tariff,
+            holidays=holidays
+        )
+        
+        # Store simulation results for further analysis
+        st.session_state['v2_simulation_results'] = simulation_results
+        
+    else:
+        st.error("❌ Battery simulation failed. Please check your configuration.")
 
 
 def _display_v2_battery_simulation_chart(df_sim, monthly_targets=None, sizing=None, selected_tariff=None, holidays=None):
