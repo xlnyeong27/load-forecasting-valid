@@ -2154,13 +2154,43 @@ def _create_v2_conditional_demand_line_with_dynamic_targets(fig, df, power_col, 
         period_type = 'Peak' if is_md else 'Off-Peak'
         
         # V2 LOGIC: Color classification using dynamic monthly target
-        if demand_value > current_target:
-            if period_type == 'Peak':
-                df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'red'
+        try:
+            # DEBUG: Check types before comparison to catch Series ambiguity
+            demand_value_type = type(demand_value).__name__
+            current_target_type = type(current_target).__name__
+            
+            # Ensure both are scalar values for comparison
+            if isinstance(demand_value, pd.Series):
+                st.error(f"🚨 SERIES AMBIGUITY SOURCE: demand_value is {demand_value_type} at timestamp {timestamp}")
+                demand_value = float(demand_value.iloc[0]) if len(demand_value) > 0 else 0.0
+                st.warning(f"Converted to scalar: {demand_value}")
+                
+            if isinstance(current_target, pd.Series):
+                st.error(f"🚨 SERIES AMBIGUITY SOURCE: current_target is {current_target_type} at timestamp {timestamp}")
+                current_target = float(current_target.iloc[0]) if len(current_target) > 0 else 0.0
+                st.warning(f"Converted to scalar: {current_target}")
+            
+            # Safe scalar comparison
+            demand_value = float(demand_value)
+            current_target = float(current_target)
+            
+            if demand_value > current_target:
+                if period_type == 'Peak':
+                    df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'red'
+                else:
+                    df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'green'
             else:
-                df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'green'
-        else:
-            df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'blue'
+                df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'blue'
+                
+        except ValueError as ve:
+            if "truth value of a Series is ambiguous" in str(ve).lower():
+                st.error(f"🚨 **SERIES AMBIGUITY CAUGHT IN COMPARISON** at timestamp {timestamp}")
+                st.error(f"demand_value type: {type(demand_value).__name__}")
+                st.error(f"current_target type: {type(current_target).__name__}")
+                raise ve
+            else:
+                # Fallback to blue for any other comparison error
+                df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'blue'
     
     # Create continuous line segments with color-coded segments
     x_data = df_copy.index
@@ -2269,9 +2299,64 @@ def _render_v2_peak_events_timeline(df, power_col, selected_tariff, holidays, ta
             target_series[:] = avg_target
         
         # Use V2 enhanced conditional demand line with dynamic monthly targets and color logic
-        fig = _create_v2_conditional_demand_line_with_dynamic_targets(
-            fig, df, power_col, target_series, selected_tariff, holidays, "Power Consumption"
-        )
+        try:
+            # DEBUG CHECKPOINT 1: Before _create_v2_conditional_demand_line_with_dynamic_targets (Line 2272)
+            st.markdown("#### 🔍 DEBUG CHECKPOINT 1 - Before Line 2272 Function Call")
+            st.write("**Function:** `_create_v2_conditional_demand_line_with_dynamic_targets`")
+            st.write("**Location:** Line 2272 in `_render_v2_peak_events_timeline`")
+            
+            # Check all parameters for Series objects before function call
+            debug_params = {
+                'fig': type(fig).__name__,
+                'df': f"{type(df).__name__} shape: {df.shape if hasattr(df, 'shape') else 'N/A'}",
+                'power_col': f"{type(power_col).__name__}: '{power_col}'",
+                'target_series': f"{type(target_series).__name__} shape: {target_series.shape if hasattr(target_series, 'shape') else 'N/A'}",
+                'selected_tariff': f"{type(selected_tariff).__name__}",
+                'holidays': f"{type(holidays).__name__}",
+                'trace_name': "Power Consumption (string)"
+            }
+            
+            st.json(debug_params)
+            
+            # Check for Series objects in parameters
+            series_detected = []
+            if isinstance(df, pd.Series):
+                series_detected.append("df is a pandas Series")
+            if isinstance(power_col, pd.Series):
+                series_detected.append("power_col is a pandas Series")
+            if isinstance(target_series, pd.Series):
+                series_detected.append("target_series is a pandas Series (expected)")
+            if isinstance(selected_tariff, pd.Series):
+                series_detected.append("selected_tariff is a pandas Series")
+            if isinstance(holidays, pd.Series):
+                series_detected.append("holidays is a pandas Series")
+                
+            if series_detected:
+                st.warning("⚠️ Series objects detected in parameters:")
+                for detection in series_detected:
+                    st.write(f"- {detection}")
+            else:
+                st.success("✅ No unexpected Series objects in parameters")
+            
+            fig = _create_v2_conditional_demand_line_with_dynamic_targets(
+                fig, df, power_col, target_series, selected_tariff, holidays, "Power Consumption"
+            )
+            
+            st.success("✅ DEBUG CHECKPOINT 1: Function call completed successfully")
+            
+        except Exception as e:
+            st.error(f"❌ DEBUG CHECKPOINT 1: Error in _create_v2_conditional_demand_line_with_dynamic_targets at line 2272")
+            st.error(f"**Error Type:** {type(e).__name__}")
+            st.error(f"**Error Message:** {str(e)}")
+            
+            # Check if it's a Series ambiguity error
+            if "truth value of a Series is ambiguous" in str(e).lower():
+                st.error("🚨 **SERIES AMBIGUITY ERROR DETECTED AT LINE 2272**")
+                st.error("This is the source of the forecasting mode boolean error!")
+            
+            # Continue without the enhanced coloring
+            st.warning("⚠️ Falling back to basic visualization without enhanced coloring")
+            return None
         
         # Add monthly targets as horizontal lines for reference
         if not monthly_targets.empty:
@@ -3074,9 +3159,81 @@ def _display_v2_battery_simulation_chart(df_sim, monthly_targets=None, sizing=No
     
     # V2 ENHANCEMENT: Add dynamic conditional coloring using monthly targets instead of static average
     # This replaces the V1 averaging approach with dynamic monthly target-based coloring
-    fig = _create_v2_conditional_demand_line_with_dynamic_targets(
-        fig, df_filtered, 'Original_Demand', target_series, selected_tariff, holidays, "Original Demand"
-    )
+    try:
+        # DEBUG CHECKPOINT 2: Before _create_v2_conditional_demand_line_with_dynamic_targets (Line 3132)
+        st.markdown("#### 🔍 DEBUG CHECKPOINT 2 - Before Line 3132 Function Call")
+        st.write("**Function:** `_create_v2_conditional_demand_line_with_dynamic_targets`")
+        st.write("**Location:** Line 3132 in `_display_v2_battery_simulation_chart`")
+        
+        # Check all parameters for Series objects before function call
+        debug_params_2 = {
+            'fig': type(fig).__name__,
+            'df_filtered': f"{type(df_filtered).__name__} shape: {df_filtered.shape if hasattr(df_filtered, 'shape') else 'N/A'}",
+            'Original_Demand_col': f"'Original_Demand' (string literal)",
+            'target_series': f"{type(target_series).__name__} shape: {target_series.shape if hasattr(target_series, 'shape') else 'N/A'}",
+            'selected_tariff': f"{type(selected_tariff).__name__}",
+            'holidays': f"{type(holidays).__name__}",
+            'trace_name': "Original Demand (string)"
+        }
+        
+        st.json(debug_params_2)
+        
+        # Check for Series objects in parameters
+        series_detected_2 = []
+        if isinstance(df_filtered, pd.Series):
+            series_detected_2.append("df_filtered is a pandas Series (should be DataFrame)")
+        if isinstance(target_series, pd.Series):
+            series_detected_2.append("target_series is a pandas Series (expected)")
+        if isinstance(selected_tariff, pd.Series):
+            series_detected_2.append("selected_tariff is a pandas Series")
+        if isinstance(holidays, pd.Series):
+            series_detected_2.append("holidays is a pandas Series")
+            
+        # Check if Original_Demand column exists and its type
+        if hasattr(df_filtered, 'columns') and 'Original_Demand' in df_filtered.columns:
+            original_demand_col = df_filtered['Original_Demand']
+            if isinstance(original_demand_col, pd.Series):
+                series_detected_2.append("df_filtered['Original_Demand'] is a pandas Series (normal for column access)")
+            st.write(f"**Original_Demand column type:** {type(original_demand_col).__name__}")
+        else:
+            st.error("❌ 'Original_Demand' column not found in df_filtered")
+            
+        if series_detected_2:
+            st.warning("⚠️ Series objects detected in parameters:")
+            for detection in series_detected_2:
+                st.write(f"- {detection}")
+        else:
+            st.success("✅ No unexpected Series objects in parameters")
+        
+        fig = _create_v2_conditional_demand_line_with_dynamic_targets(
+            fig, df_filtered, 'Original_Demand', target_series, selected_tariff, holidays, "Original Demand"
+        )
+        
+        st.success("✅ DEBUG CHECKPOINT 2: Function call completed successfully")
+        
+    except Exception as e:
+        st.error(f"❌ DEBUG CHECKPOINT 2: Error in _create_v2_conditional_demand_line_with_dynamic_targets at line 3132")
+        st.error(f"**Error Type:** {type(e).__name__}")
+        st.error(f"**Error Message:** {str(e)}")
+        
+        # Check if it's a Series ambiguity error
+        if "truth value of a Series is ambiguous" in str(e).lower():
+            st.error("🚨 **SERIES AMBIGUITY ERROR DETECTED AT LINE 3132**")
+            st.error("This is the source of the forecasting mode boolean error!")
+            
+            # Additional debugging for this specific error
+            st.markdown("**🔍 Additional Series Analysis:**")
+            try:
+                if hasattr(df_filtered, 'dtypes'):
+                    st.write("**df_filtered column types:**")
+                    st.write(df_filtered.dtypes.to_dict())
+                if hasattr(target_series, 'dtype'):
+                    st.write(f"**target_series dtype:** {target_series.dtype}")
+            except Exception as debug_e:
+                st.error(f"Error in additional debugging: {str(debug_e)}")
+        
+        # Continue without the enhanced coloring
+        st.warning("⚠️ Continuing chart without enhanced coloring due to error")
     
     # Compute symmetric range for y2 to show positive/negative bars
     try:
