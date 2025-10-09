@@ -4697,42 +4697,118 @@ error_10min = forecast_10min - actual_value
                         
                         if data_ready and simulation_data is not None:
                             try:
-                                # Get monthly targets from V2 calculation
+                                # Get monthly targets from V2 calculation - FIXED: Safe retrieval to avoid Series ambiguity
                                 if 'v2_monthly_targets' in st.session_state:
-                                    monthly_targets = st.session_state['v2_monthly_targets']
+                                    try:
+                                        monthly_targets_raw = st.session_state['v2_monthly_targets']
+                                        
+                                        # FIXED: Ensure we have a proper Series, not a boolean result
+                                        if hasattr(monthly_targets_raw, 'index') and hasattr(monthly_targets_raw, 'values'):
+                                            monthly_targets = pd.Series(
+                                                data=monthly_targets_raw.values, 
+                                                index=monthly_targets_raw.index,
+                                                name='monthly_targets'
+                                            )
+                                        else:
+                                            # Fallback if it's not a Series
+                                            monthly_targets = monthly_targets_raw
+                                            
+                                    except Exception as e:
+                                        st.error(f"❌ Error retrieving monthly targets: {str(e)}")
+                                        monthly_targets = None
                                 else:
                                     st.error("❌ Monthly targets not calculated. Please configure battery settings first.")
                                     monthly_targets = None
                                 
                                 if monthly_targets is not None:
-                                    # Extract battery parameters from battery_config with corrected key names
-                                    battery_sizing = {
-                                        'capacity_kwh': battery_config.get('total_energy_capacity', 100),
-                                        'power_rating_kw': battery_config.get('total_power_capacity', 100)
-                                    }
+                                    # Extract battery parameters from battery_config with corrected key names - FIXED: Explicit scalar conversion
+                                    try:
+                                        # FIXED: Convert to float to avoid Series ambiguity
+                                        capacity_raw = battery_config.get('total_energy_capacity', 100)
+                                        power_raw = battery_config.get('total_power_capacity', 100)
+                                        
+                                        # Ensure scalar values
+                                        capacity_kwh = float(capacity_raw.iloc[0]) if hasattr(capacity_raw, 'iloc') else float(capacity_raw)
+                                        power_rating_kw = float(power_raw.iloc[0]) if hasattr(power_raw, 'iloc') else float(power_raw)
+                                        
+                                        battery_sizing = {
+                                            'capacity_kwh': capacity_kwh,
+                                            'power_rating_kw': power_rating_kw
+                                        }
+                                        
+                                    except Exception as e:
+                                        st.error(f"❌ Error extracting battery parameters: {str(e)}")
+                                        # Fallback values
+                                        battery_sizing = {
+                                            'capacity_kwh': 100.0,
+                                            'power_rating_kw': 100.0
+                                        }
                                     
                                     battery_params = {
                                         'round_trip_efficiency': 95,  # Default efficiency
                                         'depth_of_discharge': 85      # Default DoD
                                     }
                                     
-                                    # Set up simulation parameters - ensure all variables are defined for both modes
+                                    # Set up simulation parameters - ensure all variables are defined for both modes - FIXED: Safe access
                                     interval_hours = 0.25  # 15-minute intervals
-                                    selected_tariff = st.session_state.get('selected_tariff_dict')
-                                    holidays = st.session_state.get('holidays', set())
                                     
-                                    # Ensure session state variables are set for forecast mode compatibility
-                                    if enable_forecasting:
-                                        if not hasattr(st.session_state, 'tabled_analysis_selected_battery'):
-                                            if battery_config and battery_config.get('active_battery_spec'):
-                                                st.session_state.tabled_analysis_selected_battery = {
-                                                    'spec': battery_config['active_battery_spec'],
-                                                    'label': 'Selected Battery'
-                                                }
+                                    # FIXED: Safe session state access to avoid Series ambiguity
+                                    try:
+                                        selected_tariff = st.session_state.get('selected_tariff_dict')
+                                        holidays = st.session_state.get('holidays', set())
                                         
-                                        if not hasattr(st.session_state, 'tabled_analysis_battery_quantity'):
-                                            if battery_config:
-                                                st.session_state.tabled_analysis_battery_quantity = battery_config.get('selected_quantity', 1)
+                                        # Ensure holidays is a proper set, not a Series
+                                        if hasattr(holidays, 'tolist'):
+                                            holidays = set(holidays.tolist())
+                                        elif not isinstance(holidays, set):
+                                            holidays = set(holidays) if holidays else set()
+                                            
+                                    except Exception as e:
+                                        st.warning(f"⚠️ Session state access issue: {str(e)}")
+                                        selected_tariff = None
+                                        holidays = set()
+                                    
+                                    # DEBUG: Check if battery_config contains Series objects
+                                    def debug_battery_config_series_check(config):
+                                        """Debug function to detect Series objects in battery_config"""
+                                        if config is None:
+                                            return
+                                        
+                                        series_found = []
+                                        for key, value in config.items():
+                                            if isinstance(value, pd.Series):
+                                                series_found.append(f"'{key}': {type(value).__name__} with shape {value.shape}")
+                                        
+                                        if series_found:
+                                            error_msg = f"❌ SERIES DETECTED in battery_config: {', '.join(series_found)}"
+                                            st.error(error_msg)
+                                            raise ValueError(f"Battery config contains Series objects: {series_found}")
+                                    
+                                    # Execute debug check
+                                    debug_battery_config_series_check(battery_config)
+                                    
+                                    # Ensure session state variables are set for forecast mode compatibility - FIXED: Safe operations
+                                    if enable_forecasting:
+                                        try:
+                                            if not hasattr(st.session_state, 'tabled_analysis_selected_battery'):
+                                                if battery_config and battery_config.get('active_battery_spec'):
+                                                    # FIXED: Safe access to battery_config
+                                                    battery_spec = battery_config['active_battery_spec']
+                                                    st.session_state.tabled_analysis_selected_battery = {
+                                                        'spec': battery_spec,
+                                                        'label': 'Selected Battery'
+                                                    }
+                                            
+                                            if not hasattr(st.session_state, 'tabled_analysis_battery_quantity'):
+                                                if battery_config:
+                                                    # FIXED: Safe scalar extraction
+                                                    quantity_raw = battery_config.get('selected_quantity', 1)
+                                                    quantity = int(quantity_raw.iloc[0]) if hasattr(quantity_raw, 'iloc') else int(quantity_raw)
+                                                    st.session_state.tabled_analysis_battery_quantity = quantity
+                                                    
+                                        except Exception as e:
+                                            st.warning(f"⚠️ Forecasting mode session state setup issue: {str(e)}")
+                                            # Continue with defaults
                                     
                                     # Prepare simulation parameters for the new handler function
                                     simulation_params = {
