@@ -43,54 +43,6 @@ from tariffs.peak_logic import (
 )
 
 
-def debug_forecast_data_structure():
-    """
-    Debug function to examine forecast data structure in session state
-    
-    Returns:
-        DataFrame or None: The forecast data if available
-    """
-    if 'roc_long_format' in st.session_state:
-        forecast_df = st.session_state['roc_long_format']
-        st.markdown("### 🔍 **Forecast Data Structure Analysis**")
-        
-        # Basic info
-        with st.expander("📊 **Data Shape & Info**", expanded=True):
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Rows", f"{forecast_df.shape[0]:,}")
-                st.metric("Columns", forecast_df.shape[1])
-            with col2:
-                if hasattr(forecast_df.index, 'name'):
-                    st.write(f"**Index**: {forecast_df.index.name}")
-                st.write(f"**Index Type**: {type(forecast_df.index).__name__}")
-        
-        # Column analysis
-        with st.expander("🏷️ **Column Details**"):
-            st.write("**Available Columns:**")
-            for col in forecast_df.columns:
-                col_type = forecast_df[col].dtype
-                non_null = forecast_df[col].count()
-                st.write(f"- `{col}` ({col_type}) - {non_null:,} non-null values")
-        
-        # Sample data
-        with st.expander("📋 **Sample Data (First 5 rows)**"):
-            st.dataframe(forecast_df.head())
-            
-        # Data range info
-        if 't' in forecast_df.columns:
-            with st.expander("📅 **Time Range**"):
-                time_col = pd.to_datetime(forecast_df['t'])
-                st.write(f"**Start**: {time_col.min()}")
-                st.write(f"**End**: {time_col.max()}")
-                st.write(f"**Duration**: {time_col.max() - time_col.min()}")
-        
-        return forecast_df
-    else:
-        st.warning("⚠️ No forecast data found in session state")
-        return None
-
-
 def _infer_interval_hours(datetime_index, fallback=0.25):
     """
     Infer sampling interval from datetime index using mode of timestamp differences.
@@ -2088,26 +2040,6 @@ def _create_v2_conditional_demand_line_with_dynamic_targets(fig, df, power_col, 
     """
     from tariffs.peak_logic import is_peak_rp4, get_period_classification
     
-    # VERIFICATION CHECK: Confirm df is properly provided (especially in forecasting mode)
-    if df is None:
-        st.error("❌ df from forecasting mode is None - no data provided to visualization function")
-        return fig
-    
-    if df.empty:
-        st.error("❌ df from forecasting mode is empty - no data available for visualization")
-        return fig
-    
-    # Debug info about df structure when forecasting is enabled
-    if 'v2_enable_forecasting' in st.session_state and st.session_state.get('v2_enable_forecasting', False):
-        st.markdown("#### 🔍 DEBUG - DataFrame Structure in Forecasting Mode")
-        st.write(f"**DataFrame shape:** {df.shape}")
-        st.write(f"**DataFrame columns:** {list(df.columns)}")
-        st.write(f"**Power column expected:** `{power_col}`")
-        st.write(f"**Power column exists:** {power_col in df.columns if hasattr(df, 'columns') else 'N/A'}")
-        st.write(f"**DataFrame index type:** {type(df.index).__name__}")
-        st.write("**First 3 rows:**")
-        st.dataframe(df.head(3), use_container_width=True)
-    
     # Validate inputs
     if target_series is None or len(target_series) == 0:
         st.warning("⚠️ V2 Dynamic Coloring: target_series is empty, falling back to single average")
@@ -2775,77 +2707,8 @@ def _handle_battery_simulation_workflow(simulation_params):
                 'capacity_kwh': battery_sizing.get('capacity_kwh', 100)
             }
         
-        # 🔍 DEBUG: Data Structure Analysis for df_sim
-        st.markdown("---")
-        st.markdown("### 🔍 **DEBUG - df_sim Data Structure Analysis**")
-        
-        if df_sim is not None:
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.markdown("**📊 Basic Info:**")
-                st.write(f"• **Shape**: {df_sim.shape}")
-                st.write(f"• **Index Type**: {type(df_sim.index).__name__}")
-                st.write(f"• **Index Range**: {df_sim.index[0]} to {df_sim.index[-1]}")
-                st.write(f"• **Memory Usage**: {df_sim.memory_usage(deep=True).sum() / 1024:.1f} KB")
-                
-            with col2:
-                st.markdown("**📝 Column Analysis:**")
-                st.write(f"• **Total Columns**: {len(df_sim.columns)}")
-                st.write("• **Column Names**:")
-                for i, col in enumerate(df_sim.columns, 1):
-                    st.write(f"  {i}. `{col}` ({df_sim[col].dtype})")
-            
-            st.markdown("**🎯 Required Columns Check:**")
-            required_cols = ['Original_Demand', 'Battery_Power_kW', 'Battery_SOC_Percent', 'Net_Demand_kW']
-            col_status = []
-            for col in required_cols:
-                if col in df_sim.columns:
-                    col_status.append(f"✅ `{col}` - Present")
-                else:
-                    col_status.append(f"❌ `{col}` - **Missing**")
-            
-            for status in col_status:
-                st.write(status)
-            
-            st.markdown("**📈 Data Sample (First 3 rows):**")
-            st.dataframe(df_sim.head(3), use_container_width=True)
-            
-            st.markdown("**🔢 Data Statistics:**")
-            numeric_cols = df_sim.select_dtypes(include=['number']).columns
-            if len(numeric_cols) > 0:
-                stats_df = df_sim[numeric_cols].describe().round(2)
-                st.dataframe(stats_df, use_container_width=True)
-            else:
-                st.write("No numeric columns found")
-                
-            # Check for any potential Series ambiguity issues
-            st.markdown("**⚠️ Potential Issues Check:**")
-            issue_count = 0
-            
-            # Check for empty columns
-            empty_cols = [col for col in df_sim.columns if df_sim[col].isna().all()]
-            if empty_cols:
-                st.warning(f"Empty columns detected: {empty_cols}")
-                issue_count += 1
-            
-            # Check for object columns that might cause issues
-            object_cols = df_sim.select_dtypes(include=['object']).columns.tolist()
-            if object_cols:
-                st.info(f"Object/String columns: {object_cols}")
-            
-            # Check index issues
-            if not isinstance(df_sim.index, pd.DatetimeIndex):
-                st.warning(f"Index is not DatetimeIndex: {type(df_sim.index)}")
-                issue_count += 1
-            
-            if issue_count == 0:
-                st.success("✅ No obvious structural issues detected")
-        else:
-            st.error("❌ df_sim is None - No data to analyze")
-        
-        st.markdown("---")
-        st.markdown("### 📊 **V2 Battery Operation Visualization**")
+        # Display battery simulation chart
+        st.markdown("### 📊 V2 Battery Operation Analysis")
         
         _display_v2_battery_simulation_chart(
             df_sim=df_sim,
@@ -3510,8 +3373,6 @@ def render_md_shaving_v2():
                                     
                                 except Exception as e:
                                     st.error(f"❌ Error calculating V2 monthly targets: {str(e)}")
-                                    # Add debug information
-                                    st.error(f"Debug info - target_method: {target_method}, shave_percent: {shave_percent}, target_percent: {target_percent}, target_manual_kw: {target_manual_kw}")
                                 
                             except Exception as e:
                                 st.error(f"❌ Error calculating monthly peaks: {str(e)}")
@@ -3538,20 +3399,11 @@ def render_md_shaving_v2():
                                     monthly_targets = st.session_state['v2_monthly_targets']
                                     all_monthly_events = []
                                     
-                                    # Debug information
-                                    st.info(f"🔍 **Debug Info:**")
-                                    st.write(f"- Monthly targets shape: {monthly_targets.shape}")
-                                    st.write(f"- Data shape: {df_processed.shape}")
-                                    st.write(f"- Power column: {power_col}")
-                                    st.write(f"- Detected interval: {detected_interval_hours:.4f} hours")
-                                    
                                     # Get MD rate from selected tariff
                                     total_md_rate = 0
                                     if selected_tariff and isinstance(selected_tariff, dict):
                                         rates = selected_tariff.get('Rates', {})
                                         total_md_rate = rates.get('Capacity Rate', 0) + rates.get('Network Rate', 0)
-                                    
-                                    st.write(f"- Total MD rate: {total_md_rate} RM/kW")
                                     
                                     # Process each month separately (like copy file)
                                     for month_period, target_value in monthly_targets.items():
@@ -4453,9 +4305,6 @@ error_10min = forecast_10min - actual_value
                                                         
                                                     except Exception as e:
                                                         st.error(f"❌ Error generating ROC forecasts: {str(e)}")
-                                                        import traceback
-                                                        with st.expander("🐛 Debug Information"):
-                                                            st.code(traceback.format_exc())
                                             
                                             elif enable_backtesting and not horizons:
                                                 st.warning("⚠️ Please select at least one forecast horizon")
@@ -4669,8 +4518,8 @@ error_10min = forecast_10min - actual_value
                         
                         # Determine data source based on forecast mode
                         if enable_forecasting and forecast_data_available:
-                            # Debug the original forecast data structure
-                            original_forecast_df = debug_forecast_data_structure()
+                            # Get forecast data from session state
+                            original_forecast_df = st.session_state.get('roc_long_format', None)
                             
                             if original_forecast_df is not None:
                                 # 🔮 SIMPLIFIED FORECAST DATA CONVERSION - Use P50 only
@@ -4791,25 +4640,7 @@ error_10min = forecast_10min - actual_value
                                         st.warning(f"⚠️ Session state access issue: {str(e)}")
                                         selected_tariff = None
                                         holidays = set()
-                                    
-                                    # DEBUG: Check if battery_config contains Series objects
-                                    def debug_battery_config_series_check(config):
-                                        """Debug function to detect Series objects in battery_config"""
-                                        if config is None:
-                                            return
-                                        
-                                        series_found = []
-                                        for key, value in config.items():
-                                            if isinstance(value, pd.Series):
-                                                series_found.append(f"'{key}': {type(value).__name__} with shape {value.shape}")
-                                        
-                                        if series_found:
-                                            error_msg = f"❌ SERIES DETECTED in battery_config: {', '.join(series_found)}"
-                                            st.error(error_msg)
-                                            raise ValueError(f"Battery config contains Series objects: {series_found}")
-                                    
-                                    # Execute debug check
-                                    debug_battery_config_series_check(battery_config)
+
                                     
                                     # Ensure session state variables are set for forecast mode compatibility - FIXED: Safe operations
                                     if enable_forecasting:
