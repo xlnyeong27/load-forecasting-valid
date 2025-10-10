@@ -2129,7 +2129,8 @@ def _create_v2_conditional_demand_line_with_dynamic_targets(fig, df, power_col, 
     
     for i in range(len(df_copy)):
         timestamp = df_copy.index[i]
-        demand_value = df_copy.iloc[i][power_col]
+        # FIXED: Ensure demand_value is extracted as scalar from the start
+        demand_value = float(df_copy.iloc[i][power_col])
         
         # V2 ENHANCEMENT: Get DYNAMIC monthly target for this specific timestamp
         if timestamp in target_series.index:
@@ -2140,12 +2141,15 @@ def _create_v2_conditional_demand_line_with_dynamic_targets(fig, df, power_col, 
                 month_period = timestamp.to_period('M')
                 # FIXED: Use .index instead of creating list to avoid Series ambiguity
                 if len(target_series) > 0:
-                    # Find closest timestamp by distance
+                    # Find closest timestamp by distance - FIXED: Ensure scalar result
                     time_diffs = (target_series.index - timestamp).abs()
                     closest_idx = time_diffs.idxmin()
+                    # FIXED: Ensure we get a single scalar value, not a Series
+                    if hasattr(closest_idx, '__iter__') and not isinstance(closest_idx, (str, bytes)):
+                        closest_idx = closest_idx[0] if len(closest_idx) > 0 else target_series.index[0]
                     current_target = float(target_series.loc[closest_idx])  # FIXED: Explicit scalar conversion
                 else:
-                    current_target = float(df[power_col].quantile(0.9))  # FIXED: Explicit scalar conversion
+                    current_target = float(df_copy[power_col].quantile(0.9))  # FIXED: Use df_copy instead of df
             except Exception:
                 current_target = 1000.0  # FIXED: Direct float assignment
         
@@ -2155,10 +2159,7 @@ def _create_v2_conditional_demand_line_with_dynamic_targets(fig, df, power_col, 
         
         # V2 LOGIC: Color classification using dynamic monthly target - FIXED: All values are now scalars
         try:
-            # Ensure scalar values for safe comparison (defensive programming)
-            demand_value = float(demand_value)
-            current_target = float(current_target)  # Already converted above, but double-check
-            
+            # Both values are already floats, perform comparison safely
             if demand_value > current_target:
                 if period_type == 'Peak':
                     df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'red'
@@ -2169,7 +2170,7 @@ def _create_v2_conditional_demand_line_with_dynamic_targets(fig, df, power_col, 
                 
         except Exception as e:
             # Defensive fallback for any unexpected comparison issues
-            st.warning(f"⚠️ Comparison issue at timestamp {timestamp}: {str(e)}")
+            st.error(f"❌ Series conversion error at {timestamp}: demand_value={type(demand_value)}, current_target={type(current_target)}, error={str(e)}")
             df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'blue'  # Safe fallback
     
     # Create continuous line segments with color-coded segments
