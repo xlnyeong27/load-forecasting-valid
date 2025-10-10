@@ -2014,12 +2014,12 @@ def _get_strategy_aware_discharge(strategy_mode, current_soc_percent, demand_exc
 
 
 
-def _create_v2_conditional_demand_line_with_dynamic_targets(fig, df, power_col, target_series, selected_tariff=None, holidays=None, trace_name="Original Demand"):
+def _create_v2_conditional_demand_line_with_dynamic_targets(fig, df, power_col, monthly_targets_dict, selected_tariff=None, holidays=None, trace_name="Original Demand"):
     """
     V2 ENHANCEMENT: Enhanced conditional coloring logic for Original Demand line with DYNAMIC monthly targets.
     Creates continuous line segments with different colors based on monthly target conditions.
     
-    Key V2 Innovation: Uses dynamic monthly targets instead of static averaging for color decisions.
+    Key V2 Innovation: Uses scalar monthly targets from dictionary instead of Series to avoid ambiguity.
     
     Color Logic:
     - Red: Above monthly target during Peak Periods (based on selected tariff) - Direct MD cost impact
@@ -2041,8 +2041,8 @@ def _create_v2_conditional_demand_line_with_dynamic_targets(fig, df, power_col, 
     from tariffs.peak_logic import is_peak_rp4, get_period_classification
     
     # Validate inputs
-    if target_series is None or len(target_series) == 0:
-        st.warning("⚠️ V2 Dynamic Coloring: target_series is empty, falling back to single average")
+    if monthly_targets_dict is None or len(monthly_targets_dict) == 0:
+        st.warning("⚠️ V2 Dynamic Coloring: monthly_targets_dict is empty, falling back to single average")
         # Fallback to V1 approach with average target
         avg_target = df[power_col].quantile(0.9)
         return create_conditional_demand_line_with_peak_logic(fig, df, power_col, avg_target, selected_tariff, holidays, trace_name)
@@ -2065,25 +2065,19 @@ def _create_v2_conditional_demand_line_with_dynamic_targets(fig, df, power_col, 
         demand_value = float(df_copy.iloc[i][power_col])
         
         # V2 ENHANCEMENT: Get DYNAMIC monthly target for this specific timestamp
-        if timestamp in target_series.index:
-            current_target = float(target_series.loc[timestamp])  # FIXED: Explicit scalar conversion
+        month_key = timestamp.strftime('%Y-%m')  # Create month key in YYYY-MM format
+        if month_key in monthly_targets_dict:
+            current_target = float(monthly_targets_dict[month_key])  # Direct scalar access from dictionary
         else:
-            # Fallback to closest available target
+            # Fallback to closest available month or default
             try:
-                month_period = timestamp.to_period('M')
-                # FIXED: Use .index instead of creating list to avoid Series ambiguity
-                if len(target_series) > 0:
-                    # Find closest timestamp by distance - FIXED: Ensure scalar result
-                    time_diffs = (target_series.index - timestamp).abs()
-                    closest_idx = time_diffs.idxmin()
-                    # FIXED: Ensure we get a single scalar value, not a Series
-                    if hasattr(closest_idx, '__iter__') and not isinstance(closest_idx, (str, bytes)):
-                        closest_idx = closest_idx[0] if len(closest_idx) > 0 else target_series.index[0]
-                    current_target = float(target_series.loc[closest_idx])  # FIXED: Explicit scalar conversion
+                if len(monthly_targets_dict) > 0:
+                    # Use any available target as fallback
+                    current_target = float(list(monthly_targets_dict.values())[0])
                 else:
-                    current_target = float(df_copy[power_col].quantile(0.9))  # FIXED: Use df_copy instead of df
+                    current_target = float(df_copy[power_col].quantile(0.9))  # Use data-based fallback
             except Exception:
-                current_target = 1000.0  # FIXED: Direct float assignment
+                current_target = 1000.0  # Hard fallback
         
         # Get MD window classification using RP4 2-period system
         is_md = is_peak_rp4(timestamp, holidays if holidays else set())
@@ -2271,6 +2265,25 @@ def _render_v2_peak_events_timeline(df, power_col, selected_tariff, holidays, ta
         st.error(f"Error in V2 timeline rendering: {str(e)}")
         return None
 
+
+def _create_v2_monthly_targets_dict(monthly_targets):
+    """
+    Create a dictionary of monthly targets from V2's monthly_targets Series.
+    
+    Args:
+        monthly_targets: V2's monthly targets (Series with Period index)
+        
+    Returns:
+        Dictionary with month keys (YYYY-MM format) and scalar target values
+    """
+    targets_dict = {}
+    
+    for month_period, target_value in monthly_targets.items():
+        # Convert period to string format YYYY-MM
+        month_key = str(month_period)
+        targets_dict[month_key] = float(target_value)
+    
+    return targets_dict
 
 def _create_v2_dynamic_target_series(simulation_index, monthly_targets):
     """
@@ -2525,9 +2538,16 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
     df_sim = df[[power_col]].copy()
     df_sim['Original_Demand'] = df_sim[power_col]
     
-    # V2 ENHANCEMENT: Create dynamic monthly target series
-    target_series = _create_v2_dynamic_target_series(df_sim.index, monthly_targets)
-    df_sim['Monthly_Target'] = target_series
+    # V2 ENHANCEMENT: Create monthly targets dictionary and apply to dataframe
+    monthly_targets_dict = _create_v2_monthly_targets_dict(monthly_targets)
+    target_values = []
+    for timestamp in df_sim.index:
+        month_key = timestamp.strftime('%Y-%m')
+        if month_key in monthly_targets_dict:
+            target_values.append(monthly_targets_dict[month_key])
+        else:
+            target_values.append(list(monthly_targets_dict.values())[0] if monthly_targets_dict else 1000.0)
+    df_sim['Monthly_Target'] = target_values
     df_sim['Excess_Demand'] = (df_sim[power_col] - df_sim['Monthly_Target']).clip(lower=0)
     
     # Battery parameters - FIXED: Ensure all values are scalar floats
@@ -2885,8 +2905,8 @@ def _display_v2_battery_simulation_chart(df_sim, monthly_targets=None, sizing=No
         st.info("Available columns: " + ", ".join(df_filtered.columns.tolist()))
         return
     
-    # Create V2 dynamic target series (stepped monthly targets) - filtered to match chart data
-    target_series = _create_v2_dynamic_target_series(df_filtered.index, monthly_targets)
+    # Create V2 monthly targets dictionary (scalar values) - eliminates Series ambiguity
+    monthly_targets_dict = _create_v2_monthly_targets_dict(monthly_targets)
     
     # Display filtered event range info
     if selected_filter != "All Days" and len(df_filtered) > 0:
@@ -2919,9 +2939,18 @@ def _display_v2_battery_simulation_chart(df_sim, monthly_targets=None, sizing=No
                   hovertemplate='Net: %{y:.1f} kW<br>%{x}<extra></extra>')
     )
     
-    # V2 ENHANCEMENT: Add stepped monthly target line instead of static line
+    # V2 ENHANCEMENT: Add stepped monthly target line from dictionary (avoiding Series ambiguity)
+    target_values = []
+    for timestamp in df_filtered.index:
+        month_key = timestamp.strftime('%Y-%m')
+        if month_key in monthly_targets_dict:
+            target_values.append(monthly_targets_dict[month_key])
+        else:
+            # Fallback to first available target
+            target_values.append(list(monthly_targets_dict.values())[0] if monthly_targets_dict else 1000.0)
+    
     fig.add_trace(
-        go.Scatter(x=df_filtered.index, y=target_series, 
+        go.Scatter(x=df_filtered.index, y=target_values, 
                   name='Monthly Target (V2 Dynamic)', 
                   line=dict(color='green', dash='dash', width=3),
                   hovertemplate='Monthly Target: %{y:.1f} kW<br>%{x}<extra></extra>')
@@ -2957,7 +2986,7 @@ def _display_v2_battery_simulation_chart(df_sim, monthly_targets=None, sizing=No
     # This replaces the V1 averaging approach with dynamic monthly target-based coloring
     try:
         fig = _create_v2_conditional_demand_line_with_dynamic_targets(
-            fig, df_filtered, 'Original_Demand', target_series, selected_tariff, holidays, "Original Demand"
+            fig, df_filtered, 'Original_Demand', monthly_targets_dict, selected_tariff, holidays, "Original Demand"
         )
         
     except Exception as e:
