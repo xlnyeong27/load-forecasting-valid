@@ -2059,14 +2059,6 @@ def _create_v2_conditional_demand_line_with_dynamic_targets(fig, df, power_col, 
     # Create a series with color classifications using DYNAMIC monthly targets
     df_copy['color_class'] = ''
     
-    # Add safety check for very large datasets (prevent page unresponsive)
-    max_points = 100000  # Limit processing to 100k points max
-    if len(df_copy) > max_points:
-        st.warning(f"⚠️ Dataset has {len(df_copy):,} points. Sampling to {max_points:,} points for graph performance.")
-        # Sample the dataframe to reduce processing time
-        sample_idx = np.linspace(0, len(df_copy)-1, max_points, dtype=int)
-        df_copy = df_copy.iloc[sample_idx]
-    
     # Process color classification with progress indicator for large datasets
     total_points = len(df_copy)
     
@@ -3532,29 +3524,25 @@ def render_md_shaving_v2():
                         
                         # V2 Peak Events Timeline Visualization (Automatic)
                         try:
-                            # Check if dataset is too large for graph rendering
-                            if len(df_processed) > 100000:
-                                st.error(f"❌ Dataset too large for graph rendering ({len(df_processed):,} points). Consider using a smaller data sample.")
-                            else:
-                                with st.spinner("Generating peak events timeline..."):
-                                    # Create visualization using V2 timeline function with timeout protection
-                                    fig = _render_v2_peak_events_timeline(
-                                        df_processed, 
-                                        power_col, 
-                                        selected_tariff, 
-                                        holidays,
-                                        target_method, 
-                                        shave_percent, 
-                                        target_percent, 
-                                        target_manual_kw, 
-                                        target_description
-                                    )
-                                    
-                                    if fig:
-                                        st.plotly_chart(fig, use_container_width=True)
-                                        st.success("✅ Peak events timeline generated successfully!")
-                                    else:
-                                        st.warning("⚠️ Timeline visualization not available")
+                            with st.spinner("Generating peak events timeline..."):
+                                # Create visualization using V2 timeline function with timeout protection
+                                fig = _render_v2_peak_events_timeline(
+                                    df_processed, 
+                                    power_col, 
+                                    selected_tariff, 
+                                    holidays,
+                                    target_method, 
+                                    shave_percent, 
+                                    target_percent, 
+                                    target_manual_kw, 
+                                    target_description
+                                )
+                                
+                                if fig:
+                                    st.plotly_chart(fig, use_container_width=True)
+                                    st.success("✅ Peak events timeline generated successfully!")
+                                else:
+                                    st.warning("⚠️ Timeline visualization not available")
                                     
                         except Exception as e:
                             st.error(f"❌ Error generating timeline: {str(e)}")
