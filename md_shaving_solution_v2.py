@@ -2059,25 +2059,55 @@ def _create_v2_conditional_demand_line_with_dynamic_targets(fig, df, power_col, 
     # Create a series with color classifications using DYNAMIC monthly targets
     df_copy['color_class'] = ''
     
-    for i in range(len(df_copy)):
+    # Add safety check for very large datasets (prevent page unresponsive)
+    max_points = 100000  # Limit processing to 100k points max
+    if len(df_copy) > max_points:
+        st.warning(f"⚠️ Dataset has {len(df_copy):,} points. Sampling to {max_points:,} points for graph performance.")
+        # Sample the dataframe to reduce processing time
+        sample_idx = np.linspace(0, len(df_copy)-1, max_points, dtype=int)
+        df_copy = df_copy.iloc[sample_idx]
+    
+    # Process color classification with progress indicator for large datasets
+    total_points = len(df_copy)
+    
+    for i in range(total_points):
+        # Show progress for large datasets
+        if total_points > 10000 and i % 5000 == 0:
+            progress = (i / total_points) * 100
+            st.write(f"Processing graph colors... {progress:.0f}% complete")
+            
         timestamp = df_copy.index[i]
         # FIXED: Ensure demand_value is extracted as scalar from the start
-        demand_value = float(df_copy.iloc[i][power_col])
+        try:
+            demand_value = float(df_copy.iloc[i][power_col])
+        except (ValueError, TypeError) as e:
+            # Skip invalid values and use blue (safe) color
+            df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'blue'
+            continue
         
         # V2 ENHANCEMENT: Get DYNAMIC monthly target for this specific timestamp
         month_key = timestamp.strftime('%Y-%m')  # Create month key in YYYY-MM format
-        if month_key in monthly_targets_dict:
-            current_target = float(monthly_targets_dict[month_key])  # Direct scalar access from dictionary
-        else:
-            # Fallback to first available month or default - OPTIMIZED: Removed try-catch overhead
-            if len(monthly_targets_dict) > 0:
-                current_target = float(list(monthly_targets_dict.values())[0])
+        
+        try:
+            if month_key in monthly_targets_dict:
+                current_target = float(monthly_targets_dict[month_key])  # Direct scalar access from dictionary
             else:
-                current_target = float(df_copy[power_col].quantile(0.9))  # Use data-based fallback
+                # Fallback to first available month or default - OPTIMIZED: Removed try-catch overhead
+                if len(monthly_targets_dict) > 0:
+                    current_target = float(list(monthly_targets_dict.values())[0])
+                else:
+                    current_target = float(df_copy[power_col].quantile(0.9))  # Use data-based fallback
+        except Exception:
+            # Ultimate fallback for any target calculation issues
+            current_target = float(df_copy[power_col].quantile(0.9))
         
         # Get MD window classification using RP4 2-period system
-        is_md = is_peak_rp4(timestamp, holidays if holidays else set())
-        period_type = 'Peak' if is_md else 'Off-Peak'
+        try:
+            is_md = is_peak_rp4(timestamp, holidays if holidays else set())
+            period_type = 'Peak' if is_md else 'Off-Peak'
+        except Exception:
+            # Fallback to off-peak if classification fails
+            period_type = 'Off-Peak'
         
         # V2 LOGIC: Color classification using dynamic monthly target - OPTIMIZED: Removed try-catch overhead
         # Both values are already floats, perform comparison directly
@@ -2171,6 +2201,10 @@ def _create_v2_conditional_demand_line_with_dynamic_targets(fig, df, power_col, 
 def _render_v2_peak_events_timeline(df, power_col, selected_tariff, holidays, target_method, shave_percent, target_percent, target_manual_kw, target_description):
     """Render the V2 Peak Events Timeline visualization with dynamic monthly-based targets and enhanced color logic."""
     
+    # Check dataset size and add timeout protection
+    if len(df) > 50000:
+        st.warning(f"⚠️ Large dataset detected ({len(df):,} points). Graph generation may take longer.")
+    
     try:
         # Calculate tariff-specific monthly targets using V2 functions
         monthly_targets, reference_peaks, tariff_type, enhanced_target_description = _calculate_monthly_targets_v2(
@@ -2197,8 +2231,16 @@ def _render_v2_peak_events_timeline(df, power_col, selected_tariff, holidays, ta
         
         # Use V2 enhanced conditional demand line with dynamic monthly targets and color logic
         try:
+            # Convert target_series (pandas Series with Period index) to monthly_targets_dict
+            monthly_targets_dict = {}
+            if not monthly_targets.empty:
+                for month_period, target_value in monthly_targets.items():
+                    month_key = month_period.strftime('%Y-%m')  # Convert Period to string format 
+                    monthly_targets_dict[month_key] = float(target_value)
+            
+            # Call with properly formatted dictionary
             fig = _create_v2_conditional_demand_line_with_dynamic_targets(
-                fig, df, power_col, target_series, selected_tariff, holidays, "Power Consumption"
+                fig, df, power_col, monthly_targets_dict, selected_tariff, holidays, "Power Consumption"
             )
             
         except Exception as e:
@@ -2406,10 +2448,19 @@ def _get_tou_charging_urgency(current_timestamp, soc_percent, holidays=None):
         next_day = current_date + timedelta(days=1)
         next_md_start = datetime.combine(next_day, datetime.min.time().replace(hour=14))
     
-    # Only consider weekday MD windows
-    while next_md_start.weekday() >= 5 or (holidays and next_md_start.date() in holidays):
+    # Only consider weekday MD windows (with safety counter to prevent infinite loops)
+    safety_counter = 0
+    max_iterations = 15  # Maximum 15 days to search for next weekday
+    
+    while (next_md_start.weekday() >= 5 or (holidays and next_md_start.date() in holidays)) and safety_counter < max_iterations:
         next_md_start += timedelta(days=1)
         next_md_start = next_md_start.replace(hour=14, minute=0, second=0, microsecond=0)
+        safety_counter += 1
+    
+    # If we hit the safety limit, something is wrong - use the current date
+    if safety_counter >= max_iterations:
+        st.warning("⚠️ Could not find valid MD window within 15 days, using fallback")
+        next_md_start = datetime.combine(current_date, datetime.min.time().replace(hour=14))
     
     time_until_md = next_md_start - current_timestamp
     hours_until_md = time_until_md.total_seconds() / 3600
@@ -3481,25 +3532,29 @@ def render_md_shaving_v2():
                         
                         # V2 Peak Events Timeline Visualization (Automatic)
                         try:
-                            with st.spinner("Generating peak events timeline..."):
-                                # Create visualization using V2 timeline function
-                                fig = _render_v2_peak_events_timeline(
-                                    df_processed, 
-                                    power_col, 
-                                    selected_tariff, 
-                                    holidays,
-                                    target_method, 
-                                    shave_percent, 
-                                    target_percent, 
-                                    target_manual_kw, 
-                                    target_description
-                                )
-                                
-                                if fig:
-                                    st.plotly_chart(fig, use_container_width=True)
-                                    st.success("✅ Peak events timeline generated successfully!")
-                                else:
-                                    st.warning("⚠️ Timeline visualization not available")
+                            # Check if dataset is too large for graph rendering
+                            if len(df_processed) > 100000:
+                                st.error(f"❌ Dataset too large for graph rendering ({len(df_processed):,} points). Consider using a smaller data sample.")
+                            else:
+                                with st.spinner("Generating peak events timeline..."):
+                                    # Create visualization using V2 timeline function with timeout protection
+                                    fig = _render_v2_peak_events_timeline(
+                                        df_processed, 
+                                        power_col, 
+                                        selected_tariff, 
+                                        holidays,
+                                        target_method, 
+                                        shave_percent, 
+                                        target_percent, 
+                                        target_manual_kw, 
+                                        target_description
+                                    )
+                                    
+                                    if fig:
+                                        st.plotly_chart(fig, use_container_width=True)
+                                        st.success("✅ Peak events timeline generated successfully!")
+                                    else:
+                                        st.warning("⚠️ Timeline visualization not available")
                                     
                         except Exception as e:
                             st.error(f"❌ Error generating timeline: {str(e)}")
