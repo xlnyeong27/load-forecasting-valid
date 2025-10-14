@@ -2378,6 +2378,99 @@ def _render_v2_peak_events_timeline(df, power_col, selected_tariff, holidays, ta
         return None
 
 
+def _intelligent_downsample_for_visualization(df, power_col, target_points=5000, preserve_peaks=True):
+    """
+    Intelligent downsampling function for faster visualization while preserving important data patterns.
+    
+    This function provides smart downsampling that:
+    - Preserves peak events (high demand periods)
+    - Maintains temporal distribution
+    - Uses adaptive sampling based on data characteristics
+    
+    Args:
+        df: DataFrame to downsample
+        power_col: Power column name
+        target_points: Target number of points after downsampling (default: 5000)
+        preserve_peaks: Whether to preserve peak events (default: True)
+        
+    Returns:
+        tuple: (downsampled_df, sampling_info_dict)
+    """
+    original_points = len(df)
+    
+    if original_points <= target_points:
+        return df, {
+            'was_downsampled': False,
+            'original_points': original_points,
+            'final_points': original_points,
+            'sampling_method': 'No downsampling needed'
+        }
+    
+    # Calculate sampling rate
+    base_sample_rate = max(1, original_points // target_points)
+    
+    try:
+        if preserve_peaks and power_col in df.columns:
+            # Method 1: Peak-preserving intelligent sampling
+            
+            # Identify peak events (top 5% of values)
+            peak_threshold = df[power_col].quantile(0.95)
+            peak_mask = df[power_col] >= peak_threshold
+            
+            # Always include peak events
+            peak_data = df[peak_mask]
+            
+            # Sample remaining data more sparsely
+            non_peak_data = df[~peak_mask]
+            if len(non_peak_data) > 0:
+                non_peak_sample_rate = max(1, len(non_peak_data) // (target_points - len(peak_data)))
+                sampled_non_peak = non_peak_data.iloc[::non_peak_sample_rate]
+            else:
+                sampled_non_peak = pd.DataFrame()
+            
+            # Combine peak and sampled data
+            if len(sampled_non_peak) > 0:
+                downsampled_df = pd.concat([peak_data, sampled_non_peak]).sort_index()
+            else:
+                downsampled_df = peak_data
+                
+            sampling_method = f"Peak-preserving (rate: {non_peak_sample_rate}:1, peaks: {len(peak_data)})"
+            
+        else:
+            # Method 2: Simple uniform sampling
+            downsampled_df = df.iloc[::base_sample_rate]
+            sampling_method = f"Uniform sampling (rate: {base_sample_rate}:1)"
+        
+        # Ensure we don't exceed target (in case peak preservation added too many points)
+        if len(downsampled_df) > target_points * 1.2:  # Allow 20% overage for peaks
+            final_sample_rate = max(1, len(downsampled_df) // target_points)
+            downsampled_df = downsampled_df.iloc[::final_sample_rate]
+            sampling_method += f", final rate: {final_sample_rate}:1"
+        
+        final_points = len(downsampled_df)
+        
+        return downsampled_df, {
+            'was_downsampled': True,
+            'original_points': original_points,
+            'final_points': final_points,
+            'reduction_factor': original_points / final_points,
+            'sampling_method': sampling_method,
+            'peaks_preserved': preserve_peaks
+        }
+        
+    except Exception as e:
+        # Fallback to simple sampling if anything goes wrong
+        downsampled_df = df.iloc[::base_sample_rate]
+        return downsampled_df, {
+            'was_downsampled': True,
+            'original_points': original_points,
+            'final_points': len(downsampled_df),
+            'reduction_factor': original_points / len(downsampled_df),
+            'sampling_method': f"Fallback uniform sampling (rate: {base_sample_rate}:1)",
+            'error': str(e)
+        }
+
+
 def _create_v2_monthly_targets_dict(monthly_targets):
     """
     Create a dictionary of monthly targets from V2's monthly_targets Series.
@@ -3038,18 +3131,63 @@ def _display_v2_battery_simulation_chart(df_sim, monthly_targets=None, sizing=No
     # Panel 1: V2 Enhanced MD Shaving Effectiveness with Dynamic Monthly Targets
     st.markdown("##### 1️⃣ V2 MD Shaving Effectiveness: Demand vs Battery vs Dynamic Monthly Targets")
     
-    # Display filtering status info (updated for always-visible Level 2)
-    level2_active = ('specific_day_filter' in st.session_state and 
-                    st.session_state.get('specific_day_filter', '').strip() and 
-                    not st.session_state.get('specific_day_filter', '').startswith("All "))
+    # ===== PERFORMANCE OPTIMIZATION: DOWNSAMPLING TOGGLE =====
+    col1, col2 = st.columns([3, 1])
     
-    if level2_active:
-        specific_day = st.session_state.get('specific_day_filter', '')
-        st.info(f"🆕 **V2 Enhancement with Two-Level Filtering**: Target line changes monthly based on V2 configuration, showing **{selected_filter}** filtered to **{specific_day}**")
-    elif selected_filter != "All Days":
-        st.info(f"🆕 **V2 Enhancement with Level 1 Filtering**: Target line changes monthly based on V2 configuration, showing only **{selected_filter.lower()}**")
+    with col1:
+        # Display filtering status info (updated for always-visible Level 2)
+        level2_active = ('specific_day_filter' in st.session_state and 
+                        st.session_state.get('specific_day_filter', '').strip() and 
+                        not st.session_state.get('specific_day_filter', '').startswith("All "))
+        
+        if level2_active:
+            specific_day = st.session_state.get('specific_day_filter', '')
+            st.info(f"🆕 **V2 Enhancement with Two-Level Filtering**: Target line changes monthly based on V2 configuration, showing **{selected_filter}** filtered to **{specific_day}**")
+        elif selected_filter != "All Days":
+            st.info(f"🆕 **V2 Enhancement with Level 1 Filtering**: Target line changes monthly based on V2 configuration, showing only **{selected_filter.lower()}**")
+        else:
+            st.info("🆕 **V2 Enhancement**: Target line changes monthly based on your V2 target configuration")
+    
+    with col2:
+        # Downsampling toggle for performance
+        total_points = len(df_filtered)
+        
+        # Show downsampling option if dataset is large
+        if total_points > 2000:
+            enable_downsampling = st.checkbox(
+                "⚡ Fast Mode", 
+                value=True,  # Default to enabled for better performance
+                key="enable_graph_downsampling",
+                help=f"Enable intelligent downsampling for faster rendering.\nCurrent dataset: {total_points:,} points"
+            )
+            
+            if enable_downsampling:
+                st.caption(f"🎯 **Optimized**: {total_points:,} → ~5K points")
+            else:
+                st.caption(f"🔍 **Full Detail**: {total_points:,} points")
+        else:
+            enable_downsampling = False
+            st.caption(f"📊 **Dataset**: {total_points:,} points")
+    
+    # Apply downsampling if enabled
+    if total_points > 2000 and enable_downsampling:
+        df_for_plotting, sampling_info = _intelligent_downsample_for_visualization(
+            df_filtered, 'Original_Demand', target_points=5000, preserve_peaks=True
+        )
+        
+        # Show downsampling information
+        if sampling_info['was_downsampled']:
+            reduction = sampling_info['reduction_factor']
+            method = sampling_info['sampling_method']
+            st.info(f"⚡ **Performance Mode Active**: Downsampled from {sampling_info['original_points']:,} to {sampling_info['final_points']:,} points ({reduction:.1f}x reduction) using {method}")
     else:
-        st.info("🆕 **V2 Enhancement**: Target line changes monthly based on your V2 target configuration")
+        df_for_plotting = df_filtered
+        if total_points > 10000:
+            st.warning(f"⏳ **Large Dataset Warning**: {total_points:,} points may cause slower rendering. Consider enabling Fast Mode above.")
+    
+    # Update filtered DataFrame reference for the rest of the function
+    original_df_filtered = df_filtered  # Keep reference to original
+    df_filtered = df_for_plotting  # Use downsampled version for plotting
     
     fig = go.Figure()
     
