@@ -2062,11 +2062,20 @@ def _create_v2_conditional_demand_line_with_dynamic_targets(fig, df, power_col, 
     # Process color classification with progress indicator for large datasets
     total_points = len(df_copy)
     
+    # Initialize progress bar for large datasets
+    progress_bar = None
+    progress_text = None
+    if total_points > 10000:
+        progress_text = st.empty()
+        progress_bar = st.progress(0)
+        progress_text.text("Processing graph colors...")
+    
     for i in range(total_points):
-        # Show progress for large datasets
+        # Update progress bar for large datasets
         if total_points > 10000 and i % 5000 == 0:
-            progress = (i / total_points) * 100
-            st.write(f"Processing graph colors... {progress:.0f}% complete")
+            progress_value = i / total_points
+            progress_bar.progress(progress_value)
+            progress_text.text(f"Processing graph colors... {progress_value*100:.0f}% complete")
             
         timestamp = df_copy.index[i]
         # FIXED: Ensure demand_value is extracted as scalar from the start
@@ -2110,6 +2119,16 @@ def _create_v2_conditional_demand_line_with_dynamic_targets(fig, df, power_col, 
                 df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'green'
         else:
             df_copy.iloc[i, df_copy.columns.get_loc('color_class')] = 'blue'
+    
+    # Complete progress bar for large datasets
+    if total_points > 10000 and progress_bar is not None:
+        progress_bar.progress(1.0)
+        progress_text.text("Graph colors processing complete! ✅")
+        # Clean up progress indicators after a short delay
+        import time
+        time.sleep(0.5)
+        progress_bar.empty()
+        progress_text.empty()
     
     # Create continuous line segments with color-coded segments
     x_data = df_copy.index
