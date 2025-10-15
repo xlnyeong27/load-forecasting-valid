@@ -1510,8 +1510,9 @@ def _render_battery_quantity_recommendation(max_power_shaving_required, recommen
                     help="Minimum of power and energy coverage percentages"
                 )
             
-            # Store the selected quantity in session state for use in sizing analysis
+            # Store both the recommended quantity and selected quantity in session state for use in sizing analysis
             st.session_state.tabled_analysis_battery_quantity = user_selected_qty
+            st.session_state.recommended_battery_quantity = recommended_qty  # Store for use in 7.2
             
             # Provide guidance on the selection and integration information
             if user_selected_qty == recommended_qty:
@@ -1773,17 +1774,27 @@ def _render_v2_battery_controls(max_power_shaving_required=None, max_required_en
         overall_coverage = 0
         
         if battery_power_kw > 0 and battery_energy_kwh > 0:
-            # Calculate recommended quantities
-            # Power-based quantity: ceiling(Max Power Required / Battery Power Rating)
-            qty_power = np.ceil(max_power_required / battery_power_kw) if battery_power_kw > 0 else 0
-            
-            # Energy-based quantity: ceiling(Max Energy Required / Battery Energy / DOD / Efficiency)
-            dod = 0.9  # Depth of Discharge
-            efficiency = 0.93  # Battery efficiency
-            qty_energy = np.ceil(max_energy_required / battery_energy_kwh / dod / efficiency) if battery_energy_kwh > 0 else 0
-            
-            # Recommended quantity: maximum of the two
-            recommended_qty = max(int(qty_power), int(qty_energy))
+            # Use values from Section 7.1 if available, otherwise calculate
+            if hasattr(st.session_state, 'recommended_battery_quantity') and st.session_state.recommended_battery_quantity:
+                # Use quantities from Section 7.1 Battery Quantity Recommendation
+                recommended_qty = st.session_state.recommended_battery_quantity
+                
+                # Recalculate component quantities for display consistency 
+                qty_power = np.ceil(max_power_required / battery_power_kw) if battery_power_kw > 0 else 0
+                dod = 0.9  # Depth of Discharge
+                efficiency = 0.93  # Battery efficiency
+                qty_energy = np.ceil(max_energy_required / battery_energy_kwh / dod / efficiency) if battery_energy_kwh > 0 else 0
+                
+                # Display note that values are sourced from Section 7.1
+                st.info("📊 **Values sourced from Section 6.5 Battery Sizing Analysis**")
+                
+            else:
+                # Fallback: Calculate quantities if Section 7.1 values not available
+                qty_power = np.ceil(max_power_required / battery_power_kw) if battery_power_kw > 0 else 0
+                dod = 0.9  # Depth of Discharge
+                efficiency = 0.93  # Battery efficiency  
+                qty_energy = np.ceil(max_energy_required / battery_energy_kwh / dod / efficiency) if battery_energy_kwh > 0 else 0
+                recommended_qty = max(int(qty_power), int(qty_energy))
             
             # Display quantity recommendations
             col1, col2, col3 = st.columns(3)
@@ -1808,8 +1819,12 @@ def _render_v2_battery_controls(max_power_shaving_required=None, max_required_en
     # Battery Quantity Configuration
     st.markdown("#### 🔢 Battery Quantity Configuration:")
     
-    # Get the recommended quantity from the previous calculation (if available)
-    if active_battery_spec and battery_power_kw > 0 and battery_energy_kwh > 0:
+    # Get the selected quantity from Section 7.1 (if available) or use recommended quantity
+    if hasattr(st.session_state, 'tabled_analysis_battery_quantity') and st.session_state.tabled_analysis_battery_quantity:
+        default_qty = st.session_state.tabled_analysis_battery_quantity  # Use user's selection from 7.1
+    elif hasattr(st.session_state, 'recommended_battery_quantity') and st.session_state.recommended_battery_quantity:
+        default_qty = st.session_state.recommended_battery_quantity  # Use recommended from 7.1
+    elif active_battery_spec and battery_power_kw > 0 and battery_energy_kwh > 0:
         default_qty = recommended_qty
     else:
         default_qty = 37  # Fallback default
@@ -2742,9 +2757,12 @@ def _get_enhanced_shaving_success(row, holidays=None):
         return "❓ Unknown"
 
 
-def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizing, battery_params, interval_hours, selected_tariff=None, holidays=None):
+def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizing, battery_params, interval_hours, selected_tariff=None, holidays=None, selected_strategy="Default Shaving"):
     """
-    V2-specific battery simulation with monthly target floor constraints.
+    V2-specific battery simulation with monthly target floor constraints and SOC-aware strategy support.
+    
+    Args:
+        selected_strategy: Discharge strategy ("Default Shaving" or "SOC-Aware")
     """
     import numpy as np
     
@@ -2788,30 +2806,47 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
         current_soc_kwh = float(soc[i-1]) if i > 0 else float(usable_capacity * 0.80)
         current_soc_percent = float((current_soc_kwh / usable_capacity) * 100)
         
-        # Discharge logic
+        # ===== STRATEGY-AWARE DISCHARGE LOGIC =====
         if excess > 0 and is_md_window(current_timestamp, holidays):
-            # Calculate discharge power (limited by monthly target floor)
-            max_allowable_discharge = current_demand - monthly_target
+            # Calculate available excess demand for shaving
+            demand_excess_kw = current_demand - monthly_target
             
-            # C-rate and SOC constraints
+            # Use strategy-aware discharge calculation
+            strategy_result = _get_strategy_aware_discharge(
+                strategy_mode=selected_strategy,
+                current_soc_percent=current_soc_percent,
+                demand_excess_kw=demand_excess_kw,
+                battery_power_kw=max_power
+            )
+            
+            # Get recommended discharge power from strategy
+            recommended_discharge = strategy_result['power_kw']
+            
+            # Still apply C-rate and energy constraints as safety limits
             power_limits = _calculate_c_rate_limited_power_simple(
                 current_soc_percent, max_power, battery_capacity, 1.0
             )
             max_discharge_power = power_limits['max_discharge_power_kw']
             
-            # Apply all constraints - FIXED: Ensure all values are scalar
-            required_discharge = min(
-                float(max_allowable_discharge),
-                float(max_power),
-                float(max_discharge_power)
+            # Apply maximum allowable discharge (cannot exceed demand excess)
+            max_allowable_discharge = current_demand - monthly_target
+            
+            # Final discharge power considering all constraints
+            actual_discharge = min(
+                float(recommended_discharge),        # Strategy recommendation
+                float(max_allowable_discharge),     # Cannot exceed demand excess
+                float(max_discharge_power),         # C-rate limit
+                float(max_power)                    # Power rating limit
             )
             
-            # Check energy availability (5% minimum SOC)
-            min_soc_energy = float(usable_capacity * 0.05)
+            # Check energy availability constraint
+            strategy_min_soc = 0.20 if selected_strategy == "SOC-Aware" else 0.05
+            min_soc_energy = float(usable_capacity * strategy_min_soc)
             max_discharge_energy = max(0, float(current_soc_kwh - min_soc_energy))
             max_discharge_from_energy = float(max_discharge_energy / interval_hours)
             
-            actual_discharge = min(float(required_discharge), float(max_discharge_from_energy))
+            # Final energy availability check
+            actual_discharge = min(float(actual_discharge), float(max_discharge_from_energy))
             actual_discharge = max(0, float(actual_discharge))
             
             battery_power[i] = actual_discharge
@@ -2871,7 +2906,7 @@ def _handle_battery_simulation_workflow(simulation_params):
     Handle the complete battery simulation workflow.
     This function is called after _simulate_battery_operation_v2 is defined to avoid function order issues.
     """
-    # Extract parameters
+    # Extract parameters including SOC-aware strategy
     simulation_data = simulation_params['simulation_data']
     power_col = simulation_params['power_col']
     monthly_targets = simulation_params['monthly_targets']
@@ -2882,10 +2917,14 @@ def _handle_battery_simulation_workflow(simulation_params):
     holidays = simulation_params['holidays']
     enable_forecasting = simulation_params.get('enable_forecasting', False)
     battery_config = simulation_params.get('battery_config', {})
+    selected_strategy = simulation_params.get('selected_strategy', 'Default Shaving')
     
-    # Run the battery simulation
+    # Run the battery simulation with selected strategy
     st.markdown("### 🔄 Running Battery Operation Simulation...")
-    with st.spinner("Simulating battery operation..."):
+    strategy_msg = f"Using **{selected_strategy}** discharge strategy"
+    st.info(f"⚡ {strategy_msg}")
+    
+    with st.spinner(f"Simulating battery operation with {selected_strategy} strategy..."):
         simulation_results = _simulate_battery_operation_v2(
             df=simulation_data,
             power_col=power_col,
@@ -2894,11 +2933,20 @@ def _handle_battery_simulation_workflow(simulation_params):
             battery_params=battery_params,
             interval_hours=interval_hours,
             selected_tariff=selected_tariff,
-            holidays=holidays
+            holidays=holidays,
+            selected_strategy=selected_strategy
         )
     
     if simulation_results and 'df_sim' in simulation_results:
         st.success("✅ **Battery simulation completed successfully!**")
+        
+        # ===== STRATEGY IMPACT DISPLAY =====
+        st.info(f"🎯 **Strategy Used:** {selected_strategy}")
+        
+        if selected_strategy == "SOC-Aware":
+            st.success("✅ **SOC-Aware Strategy Active**: Conservative discharge (20% min SOC, 60% excess use) - Prioritizes battery longevity")
+        else:
+            st.success("✅ **Default Strategy Active**: Aggressive discharge (5% min SOC, 80% excess use) - Prioritizes maximum MD savings")
         
         # Display simulation summary
         df_sim = simulation_results['df_sim']
@@ -2919,7 +2967,160 @@ def _handle_battery_simulation_workflow(simulation_params):
             
         with col4:
             avg_soc = df_sim['Battery_SOC_Percent'].mean()
-            st.metric("Avg SOC", f"{avg_soc:.1f}%")
+            min_soc = df_sim['Battery_SOC_Percent'].min()
+            st.metric("Avg SOC", f"{avg_soc:.1f}%", delta=f"Min: {min_soc:.1f}%")
+        
+        # ===== STRATEGY IMPACT ANALYSIS =====
+        st.markdown("##### 🔍 Strategy Performance Analysis")
+        
+        # Calculate strategy-specific metrics
+        low_soc_events = len(df_sim[df_sim['Battery_SOC_Percent'] < 20])
+        critical_soc_events = len(df_sim[df_sim['Battery_SOC_Percent'] < 10])
+        discharge_efficiency = (total_discharge / max(total_charge, 1)) * 100
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric(
+                "Discharge Efficiency", 
+                f"{discharge_efficiency:.1f}%",
+                help="Ratio of energy discharged vs charged - higher is better for MD savings"
+            )
+            
+        with col2:
+            if selected_strategy == "SOC-Aware":
+                st.metric(
+                    "Low SOC Events (<20%)", 
+                    low_soc_events,
+                    delta="Conservative threshold" if low_soc_events == 0 else "Review settings",
+                    help="SOC-Aware strategy targets 20% minimum SOC"
+                )
+            else:
+                st.metric(
+                    "Critical SOC Events (<10%)", 
+                    critical_soc_events,
+                    delta="Aggressive threshold" if critical_soc_events < 10 else "Consider SOC-Aware",
+                    help="Default strategy allows discharge to 5% minimum SOC"
+                )
+                
+        with col3:
+            battery_utilization = (df_sim['Battery_Power_kW'].abs().max() / battery_sizing['power_rating_kw']) * 100
+            st.metric(
+                "Peak Utilization", 
+                f"{battery_utilization:.1f}%",
+                help="Maximum battery power utilization achieved"
+            )
+        
+        # ===== SOC-AWARE CONSERVATION MODE RESULTS =====
+        if selected_strategy == "SOC-Aware":
+            st.markdown("---")
+            st.markdown("### 🔋 Conservation Mode Results")
+            
+            # Calculate conservation-specific metrics
+            soc_threshold = 20.0  # SOC-Aware conservative threshold
+            
+            # Conservation periods: when SOC was at or below threshold
+            conservation_mask = df_sim['Battery_SOC_Percent'] <= soc_threshold
+            conservation_periods = conservation_mask.sum()
+            total_periods = len(df_sim)
+            conservation_rate = (conservation_periods / total_periods * 100) if total_periods > 0 else 0
+            
+            # Calculate minimum exceedance that was conserved
+            if 'Monthly_Target' in df_sim.columns:
+                excess_demand = df_sim['Original_Demand'] - df_sim['Monthly_Target'] 
+                positive_excess = excess_demand[excess_demand > 0]
+                min_exceedance = positive_excess.min() if len(positive_excess) > 0 else 0
+            else:
+                min_exceedance = 0
+            
+            # Display main conservation metrics
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric(
+                    "Conservation Periods", 
+                    conservation_periods,
+                    help="Number of intervals when SOC was at or below threshold"
+                )
+            
+            with col2: 
+                st.metric(
+                    "Conservation Rate", 
+                    f"{conservation_rate:.1f}%",
+                    help="Percentage of time in conservation mode"
+                )
+            
+            with col3:
+                st.metric(
+                    "Min Exceedance Observed", 
+                    f"{min_exceedance:.1f} kW",
+                    help="Smallest excess demand that triggered conservation"
+                )
+            
+            with col4:
+                st.metric(
+                    "SOC Threshold Used", 
+                    f"{soc_threshold:.0f}%",
+                    help="SOC level that activates conservation"
+                )
+            
+            # Conservation success message
+            if conservation_periods > 0:
+                st.success(f"🛡️ Conservation mode was activated {conservation_periods} times, preserving battery life by using reduced targets")
+            else:
+                st.info("🔋 Battery remained above conservation threshold throughout simulation")
+            
+            # Conservation Parameters Section
+            st.markdown("#### 🔧 Conservation Parameters") 
+            
+            col_params1, col_params2 = st.columns(2)
+            
+            with col_params1:
+                st.markdown("**SOC Activation Threshold (%)**")
+                soc_activation = st.slider(
+                    "SOC Activation Threshold (%)",
+                    min_value=10, 
+                    max_value=90, 
+                    value=50, 
+                    step=5,
+                    key="conservation_soc_activation", 
+                    label_visibility="collapsed",
+                    help="SOC level below which conservation mode activates"
+                )
+            
+            with col_params2:
+                st.markdown("**Battery kW to be Conserved**")  
+                conservation_kw = st.number_input(
+                    "Battery kW to be Conserved",
+                    min_value=0.0, 
+                    max_value=500.0, 
+                    value=100.0, 
+                    step=10.0,
+                    key="conservation_power_conserved",
+                    label_visibility="collapsed", 
+                    help="Amount of battery power to reserve for conservation"
+                )
+            
+            # Active Days Selection Section
+            st.markdown("#### 📅 Active Day(s) Selection")
+            st.markdown("**📅 Select dates for Battery Conservation Mode:**")
+            
+            # Get available dates from simulation
+            if hasattr(df_sim.index, 'date'):
+                sim_dates = pd.to_datetime(df_sim.index.date).unique()
+            else:
+                sim_dates = pd.to_datetime(df_sim.index).dt.date.unique()
+                
+            date_options = ["All Days"] + [pd.to_datetime(date).strftime('%Y-%m-%d') for date in sorted(sim_dates)]
+            
+            conservation_dates = st.multiselect(
+                "Select dates for Battery Conservation Mode:", 
+                options=date_options,
+                default=["All Days"],
+                key="conservation_active_dates",
+                label_visibility="collapsed",
+                help="Select specific dates to apply conservation mode"
+            )
         
         # Display the comprehensive battery simulation chart
         st.markdown("### 📊 Interactive Battery Operation Analysis")
@@ -4673,19 +4874,32 @@ error_10min = forecast_10min - actual_value
                                 help="Choose the demand shaving strategy based on your optimization goals"
                             )
                             
-                            # Display strategy information (no actions implemented yet)
+                            # ===== SOC-AWARE STRATEGY INTEGRATION =====
+                            # Store selected strategy in session state for battery simulation
+                            if 'selected_discharge_strategy' not in st.session_state:
+                                st.session_state.selected_discharge_strategy = "Default Shaving"
+                            
+                            st.session_state.selected_discharge_strategy = selected_strategy
+                            
+                            # Display comprehensive strategy information
                             strategy_descriptions = {
                                 "Default Shaving": {
-                                    "description": "Standard peak shaving using fixed thresholds and basic battery operation",
+                                    "description": "Aggressive peak shaving using maximum battery capacity for MD cost reduction",
                                     "data_source": "Historical/Forecast",
                                     "complexity": "Low",
-                                    "optimization": "Basic peak reduction"
+                                    "optimization": "Maximum MD cost savings",
+                                    "soc_threshold": "5% minimum SOC",
+                                    "discharge_rate": "80% of excess demand",
+                                    "behavior": "Prioritizes maximum MD cost savings, allows deeper discharge"
                                 },
                                 "SOC-Aware": {
-                                    "description": "State-of-charge aware shaving that considers battery capacity and health",
+                                    "description": "Conservative shaving that prioritizes battery longevity and health preservation",
                                     "data_source": "Historical/Forecast", 
                                     "complexity": "Medium",
-                                    "optimization": "Battery longevity + peak reduction"
+                                    "optimization": "Battery longevity + moderate peak reduction",
+                                    "soc_threshold": "20% minimum SOC",
+                                    "discharge_rate": "60% of excess demand", 
+                                    "behavior": "Preserves battery health, more conservative discharge patterns"
                                 },
                                 "Hybrid": {
                                     "description": "Combination of multiple strategies with dynamic switching based on conditions",
@@ -4713,8 +4927,32 @@ error_10min = forecast_10min - actual_value
                                 }
                             }
                             
+                            # Display selected strategy details
                             if selected_strategy in strategy_descriptions:
                                 strategy_info = strategy_descriptions[selected_strategy]
+                                
+                                # Show enhanced strategy information for implemented strategies
+                                if selected_strategy in ["Default Shaving", "SOC-Aware"]:
+                                    st.success(f"**🎯 Active Strategy:** {selected_strategy}")
+                                    
+                                    col1, col2 = st.columns(2)
+                                    with col1:
+                                        st.info(f"**Description:** {strategy_info['description']}")
+                                        st.info(f"**SOC Threshold:** {strategy_info['soc_threshold']}")
+                                    
+                                    with col2:
+                                        st.info(f"**Discharge Rate:** {strategy_info['discharge_rate']}")  
+                                        st.info(f"**Behavior:** {strategy_info['behavior']}")
+                                        
+                                    # Add strategy comparison
+                                    if selected_strategy == "SOC-Aware":
+                                        st.warning("⚠️ **SOC-Aware Mode**: Conservative approach prioritizes battery longevity over maximum savings")
+                                    else:
+                                        st.warning("⚠️ **Default Mode**: Aggressive approach prioritizes maximum MD cost savings")
+                                        
+                                else:
+                                    # Show basic info for non-implemented strategies
+                                    st.warning(f"**Strategy: {selected_strategy}** - Implementation pending")
                                 
                                 col1, col2 = st.columns(2)
                                 with col1:
@@ -4909,6 +5147,9 @@ error_10min = forecast_10min - actual_value
                                             st.warning(f"⚠️ Forecasting mode session state setup issue: {str(e)}")
                                             # Continue with defaults
                                     
+                                    # Get selected discharge strategy from session state
+                                    selected_strategy = st.session_state.get('selected_discharge_strategy', 'Default Shaving')
+                                    
                                     # Prepare simulation parameters for the new handler function
                                     simulation_params = {
                                         'simulation_data': simulation_data,
@@ -4920,7 +5161,8 @@ error_10min = forecast_10min - actual_value
                                         'selected_tariff': selected_tariff,
                                         'holidays': holidays,
                                         'enable_forecasting': enable_forecasting,
-                                        'battery_config': battery_config
+                                        'battery_config': battery_config,
+                                        'selected_strategy': selected_strategy
                                     }
                                     
                                     # Call the handler function (defined after _simulate_battery_operation_v2)
