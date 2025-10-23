@@ -396,8 +396,6 @@ def _generate_monthly_summary_table(all_monthly_events, selected_tariff, holiday
     """
     Generate monthly summary table for Section B2.
     
-    CORRECTED METHODOLOGY: Uses daily clustering as intermediary step to match reference calculations.
-    
     Args:
         all_monthly_events: List of peak events from peak events detection
         selected_tariff: Selected tariff configuration
@@ -410,13 +408,18 @@ def _generate_monthly_summary_table(all_monthly_events, selected_tariff, holiday
     if not all_monthly_events or len(all_monthly_events) == 0:
         return pd.DataFrame()
     
-    # STEP 1: Generate daily clustering summary first (intermediary calculation)
-    daily_clustering_df = _generate_clustering_summary_table(all_monthly_events, selected_tariff, holidays)
+    # Group events by month
+    monthly_events = {}
+    for event in all_monthly_events:
+        event_date = event.get('Start Date')
+        if event_date:
+            # Extract year-month (e.g., "2025-01")
+            month_key = event_date.strftime('%Y-%m')
+            if month_key not in monthly_events:
+                monthly_events[month_key] = []
+            monthly_events[month_key].append(event)
     
-    if daily_clustering_df.empty:
-        return pd.DataFrame()
-    
-    # Determine tariff type for column naming
+    # Determine tariff type for MD cost calculation
     tariff_type = 'General'  # Default
     if selected_tariff:
         tariff_name = selected_tariff.get('Tariff', '').lower()
@@ -426,33 +429,36 @@ def _generate_monthly_summary_table(all_monthly_events, selected_tariff, holiday
         if 'tou' in tariff_name or 'tou' in tariff_type_field or tariff_type_field == 'tou':
             tariff_type = 'TOU'
     
-    # STEP 2: Group daily results by month and take maximums
-    # Add month column to daily clustering data
-    daily_clustering_df['Month'] = pd.to_datetime(daily_clustering_df['Date']).dt.strftime('%Y-%m')
+    # Create summary data
+    summary_data = []
+    for month_key, events in monthly_events.items():
+        
+        # Calculate MD excess values based on tariff type
+        if tariff_type == 'TOU':
+            # For TOU: Use TOU-specific values
+            md_excess_values = [event.get('TOU Excess (kW)', 0) or 0 for event in events]
+            energy_required_values = [event.get('TOU Required Energy (kWh)', 0) or 0 for event in events]
+        else:
+            # For General: Use General values (24/7 MD impact)
+            md_excess_values = [event.get('General Excess (kW)', 0) or 0 for event in events]
+            energy_required_values = [event.get('General Required Energy (kWh)', 0) or 0 for event in events]
+        
+        # Calculate maximum values for the month
+        max_md_excess_month = max(md_excess_values) if md_excess_values else 0
+        max_energy_required_month = max(energy_required_values) if energy_required_values else 0
+        
+        summary_data.append({
+            'Month': month_key,
+            f'{tariff_type} MD Excess (Max kW)': round(max_md_excess_month, 2),
+            f'{tariff_type} Required Energy (Max kWh)': round(max_energy_required_month, 2)
+        })
     
-    # Define column names based on tariff type
-    md_excess_col = f'{tariff_type} MD Excess (Max kW)'
-    energy_required_col = f'{tariff_type} Total Energy Required (sum kWh)'
+    # Create DataFrame and sort by month
+    df_summary = pd.DataFrame(summary_data)
+    if not df_summary.empty:
+        df_summary = df_summary.sort_values('Month')
     
-    # Group by month and calculate maximums from daily values
-    monthly_summary = daily_clustering_df.groupby('Month').agg({
-        md_excess_col: 'max',  # Maximum daily MD excess becomes monthly MD excess
-        energy_required_col: 'max'  # Maximum daily energy required becomes monthly energy required
-    }).reset_index()
-    
-    # Rename energy column to match expected format
-    monthly_summary = monthly_summary.rename(columns={
-        energy_required_col: f'{tariff_type} Required Energy (Max kWh)'
-    })
-    
-    # Round values for display
-    monthly_summary[md_excess_col] = monthly_summary[md_excess_col].round(2)
-    monthly_summary[f'{tariff_type} Required Energy (Max kWh)'] = monthly_summary[f'{tariff_type} Required Energy (Max kWh)'].round(2)
-    
-    # Sort by month
-    monthly_summary = monthly_summary.sort_values('Month')
-    
-    return monthly_summary
+    return df_summary
 
 
 def build_daily_simulator_structure(df, threshold_kw, clusters_df, selected_tariff=None):
@@ -2757,12 +2763,14 @@ def _get_enhanced_shaving_success(row, holidays=None):
         return "❓ Unknown"
 
 
-def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizing, battery_params, interval_hours, selected_tariff=None, holidays=None, selected_strategy="Default Shaving"):
+def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizing, battery_params, interval_hours, selected_tariff=None, holidays=None, conservation_enabled=False, soc_threshold=50, battery_kw_conserved=100.0, unused_param=1.0, conservation_dates=None):
     """
-    V2-specific battery simulation with monthly target floor constraints and SOC-aware strategy support.
+    V2-specific battery simulation with monthly target floor constraints and conservation mode support.
     
     Args:
-        selected_strategy: Discharge strategy ("Default Shaving" or "SOC-Aware")
+        conservation_enabled: Enable conservation mode when SOC drops below threshold
+        soc_threshold: SOC percentage below which conservation activates
+        battery_kw_conserved: Battery power to conserve during conservation mode
     """
     import numpy as np
     
@@ -2794,6 +2802,12 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
     battery_power = np.zeros(len(df_sim))
     net_demand = df_sim[power_col].copy()
     
+    # Conservation mode tracking variables (from copy file formulas)
+    conservation_activated = np.zeros(len(df_sim), dtype=bool)
+    running_min_exceedance = np.full(len(df_sim), np.inf)
+    
+    # SOC-aware strategy parameters (soc_threshold is now passed as parameter)
+    
     # Main simulation loop
     for i in range(len(df_sim)):
         # FIXED: Convert all pandas Series values to scalar floats
@@ -2806,6 +2820,23 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
         current_soc_kwh = float(soc[i-1]) if i > 0 else float(usable_capacity * 0.80)
         current_soc_percent = float((current_soc_kwh / usable_capacity) * 100)
         
+        # ===== CONSERVATION MODE TRACKING (from copy file formulas) =====
+        if conservation_enabled:
+            # Check if conservation should be activated (SOC below threshold)
+            conservation_activated[i] = current_soc_percent < soc_threshold
+            
+            # Track running minimum exceedance for conservation metrics
+            if excess > 0:
+                if i == 0:
+                    running_min_exceedance[i] = excess
+                else:
+                    running_min_exceedance[i] = min(running_min_exceedance[i-1], excess)
+            else:
+                if i > 0:
+                    running_min_exceedance[i] = running_min_exceedance[i-1]
+                else:
+                    running_min_exceedance[i] = np.inf
+        
         # ===== STRATEGY-AWARE DISCHARGE LOGIC =====
         if excess > 0 and is_md_window(current_timestamp, holidays):
             # Calculate available excess demand for shaving
@@ -2813,7 +2844,7 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
             
             # Use strategy-aware discharge calculation
             strategy_result = _get_strategy_aware_discharge(
-                strategy_mode=selected_strategy,
+                strategy_mode="SOC-Aware" if conservation_enabled else "Default Shaving",
                 current_soc_percent=current_soc_percent,
                 demand_excess_kw=demand_excess_kw,
                 battery_power_kw=max_power
@@ -2840,7 +2871,7 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
             )
             
             # Check energy availability constraint
-            strategy_min_soc = 0.20 if selected_strategy == "SOC-Aware" else 0.05
+            strategy_min_soc = 0.20 if conservation_enabled else 0.05
             min_soc_energy = float(usable_capacity * strategy_min_soc)
             max_discharge_energy = max(0, float(current_soc_kwh - min_soc_energy))
             max_discharge_from_energy = float(max_discharge_energy / interval_hours)
@@ -2892,12 +2923,57 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
     total_discharge = float(sum([p * interval_hours for p in battery_power if p > 0]))
     total_charge = float(sum([abs(p) * interval_hours for p in battery_power if p < 0]))
     
+    # Calculate conservation results (using formulas from copy file)
+    conservation_results = {}
+    if conservation_enabled:
+        conservation_periods = int(np.sum(conservation_activated))
+        total_periods = len(conservation_activated)
+        conservation_rate = float((conservation_periods / total_periods * 100) if total_periods > 0 else 0)
+        
+        # Find minimum exceedance observed (from copy file formula)
+        valid_exceedances = running_min_exceedance[running_min_exceedance != np.inf]
+        min_exceedance_observed = float(np.min(valid_exceedances)) if len(valid_exceedances) > 0 else 0.0
+        
+        conservation_results = {
+            'conservation_periods': conservation_periods,
+            'conservation_rate_percent': conservation_rate,
+            'min_exceedance_observed_kw': min_exceedance_observed,
+            'soc_threshold_used': soc_threshold
+        }
+    
+    # V2 Peak reduction using monthly targets (not static) - IMPROVED HIERARCHY
+    df_md_peak_for_reduction = df_sim[df_sim.index.to_series().apply(lambda ts: is_md_window(ts, holidays))]
+
+    if len(df_md_peak_for_reduction) > 0:
+        # V2 CALCULATION: Peak reduction against monthly targets
+        daily_reduction_analysis = df_md_peak_for_reduction.groupby(df_md_peak_for_reduction.index.date).agg({
+            'Original_Demand': 'max',
+            'Net_Demand_kW': 'max',
+            'Monthly_Target': 'first'  # V2: Get monthly target for each day
+        }).reset_index()
+        daily_reduction_analysis.columns = ['Date', 'Original_Peak_MD', 'Net_Peak_MD', 'Monthly_Target']
+        
+        # V2 Peak reduction: Original - Net (with monthly target context)
+        daily_reduction_analysis['Peak_Reduction'] = daily_reduction_analysis['Original_Peak_MD'] - daily_reduction_analysis['Net_Peak_MD']
+        peak_reduction = daily_reduction_analysis['Peak_Reduction'].max()
+    else:
+        # ERROR: No MD recording data available for proper peak reduction calculation
+        peak_reduction = -999.0  # Error indicator
+        st.error("❌ **Peak Reduction Calculation Error**: No MD recording data available during weekdays 2PM-10PM (excluding holidays). Cannot calculate meaningful peak reduction.")
+        st.warning("⚠️ **Data Issue**: Your dataset may not contain sufficient weekday data during MD recording periods (2PM-10PM). Please check your data coverage.")
+    
     return {
         'df_sim': df_sim,
         'total_discharge_kwh': total_discharge,
         'total_charge_kwh': total_charge,
-        'peak_reduction_kw': float(df_sim['Original_Demand'].max() - df_sim['Net_Demand_kW'].max()),
-        'avg_soc_percent': float(df_sim['Battery_SOC_Percent'].mean())
+        'peak_reduction_kw': float(peak_reduction),
+        'avg_soc_percent': float(df_sim['Battery_SOC_Percent'].mean()),
+        'conservation_results': conservation_results,
+        'conservation_enabled': conservation_enabled,
+        'conservation_periods': conservation_results.get('conservation_periods', 0),
+        'conservation_rate_percent': conservation_results.get('conservation_rate_percent', 0),
+        'min_exceedance_observed_kw': conservation_results.get('min_exceedance_observed_kw', 0),
+        'soc_threshold_used': soc_threshold
     }
 
 
@@ -2934,7 +3010,11 @@ def _handle_battery_simulation_workflow(simulation_params):
             interval_hours=interval_hours,
             selected_tariff=selected_tariff,
             holidays=holidays,
-            selected_strategy=selected_strategy
+            conservation_enabled=(selected_strategy == "SOC-Aware"),
+            soc_threshold=50,
+            battery_kw_conserved=100.0,
+            unused_param=1.0,
+            conservation_dates=None
         )
     
     if simulation_results and 'df_sim' in simulation_results:
@@ -2954,16 +3034,27 @@ def _handle_battery_simulation_workflow(simulation_params):
         # Summary metrics
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            total_discharge = df_sim[df_sim['Battery_Power_kW'] > 0]['Battery_Power_kW'].sum() * interval_hours
-            st.metric("Total Discharge", f"{total_discharge:.1f} kWh")
             
+            #total_discharge = df_sim[df_sim['Battery_Power_kW'] > 0]['Battery_Power_kW'].sum() * interval_hours
+            st.metric(
+                "Peak Reduction", f"{simulation_results.get('peak_reduction_kw',0):.1f} kW",
+                help="Maximum peak demand reduction achieved"
+            )
+
         with col2:
-            total_charge = abs(df_sim[df_sim['Battery_Power_kW'] < 0]['Battery_Power_kW'].sum()) * interval_hours
-            st.metric("Total Charge", f"{total_charge:.1f} kWh")
+            #total_charge = abs(df_sim[df_sim['Battery_Power_kW'] < 0]['Battery_Power_kW'].sum()) * interval_hours
+            st.metric(
+                "Success Rate", 
+                f"{simulation_results.get('success_rate',0):.1f}%",
+                help="Percentage of MD events where target was met or significantly reduced"
+            )
             
         with col3:
-            peak_reduction = df_sim['Original_Demand'].max() - df_sim['Net_Demand_kW'].max()
-            st.metric("Peak Reduction", f"{peak_reduction:.1f} kW")
+            st.metric(
+                "Total Discharge", 
+                f"{simulation_results.get('total_discharge_kwh',0):.1f} kWh",
+                help="Total energy discharged during simulation"
+            )   
             
         with col4:
             avg_soc = df_sim['Battery_SOC_Percent'].mean()
@@ -2976,6 +3067,8 @@ def _handle_battery_simulation_workflow(simulation_params):
         # Calculate strategy-specific metrics
         low_soc_events = len(df_sim[df_sim['Battery_SOC_Percent'] < 20])
         critical_soc_events = len(df_sim[df_sim['Battery_SOC_Percent'] < 10])
+        total_discharge = simulation_results.get('total_discharge_kwh', 0)
+        total_charge = simulation_results.get('total_charge_kwh', 1)  # Use 1 as minimum to avoid division by zero
         discharge_efficiency = (total_discharge / max(total_charge, 1)) * 100
         
         col1, col2, col3 = st.columns(3)
@@ -3012,63 +3105,49 @@ def _handle_battery_simulation_workflow(simulation_params):
             )
         
         # ===== SOC-AWARE CONSERVATION MODE RESULTS =====
-        if selected_strategy == "SOC-Aware":
+        if simulation_results.get('conservation_enabled', False):
             st.markdown("---")
-            st.markdown("### 🔋 Conservation Mode Results")
+            st.markdown("#### 🔋 Conservation Mode Results")
             
-            # Calculate conservation-specific metrics
-            soc_threshold = 20.0  # SOC-Aware conservative threshold
+            conservation_periods = simulation_results.get('conservation_periods', 0)
+            conservation_rate = simulation_results.get('conservation_rate_percent', 0)
+            min_exceedance = simulation_results.get('min_exceedance_observed_kw', 0)
+            soc_threshold = simulation_results.get('soc_threshold_used', 50.0)
             
-            # Conservation periods: when SOC was at or below threshold
-            conservation_mask = df_sim['Battery_SOC_Percent'] <= soc_threshold
-            conservation_periods = conservation_mask.sum()
-            total_periods = len(df_sim)
-            conservation_rate = (conservation_periods / total_periods * 100) if total_periods > 0 else 0
-            
-            # Calculate minimum exceedance that was conserved
-            if 'Monthly_Target' in df_sim.columns:
-                excess_demand = df_sim['Original_Demand'] - df_sim['Monthly_Target'] 
-                positive_excess = excess_demand[excess_demand > 0]
-                min_exceedance = positive_excess.min() if len(positive_excess) > 0 else 0
-            else:
-                min_exceedance = 0
-            
-            # Display main conservation metrics
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
                 st.metric(
                     "Conservation Periods", 
-                    conservation_periods,
-                    help="Number of intervals when SOC was at or below threshold"
+                    f"{conservation_periods}",
+                    help="Number of intervals where conservation was activated"
                 )
             
-            with col2: 
+            with col2:
                 st.metric(
-                    "Conservation Rate", 
+                    "Conservation Rate",
                     f"{conservation_rate:.1f}%",
-                    help="Percentage of time in conservation mode"
+                    help="Percentage of time conservation mode was active"
                 )
             
             with col3:
                 st.metric(
-                    "Min Exceedance Observed", 
+                    "Min Exceedance Observed",
                     f"{min_exceedance:.1f} kW",
-                    help="Smallest excess demand that triggered conservation"
+                    help="Minimum exceedance that was locked in during conservation"
                 )
             
             with col4:
                 st.metric(
-                    "SOC Threshold Used", 
+                    "SOC Threshold Used",
                     f"{soc_threshold:.0f}%",
-                    help="SOC level that activates conservation"
+                    help="SOC level below which conservation activated"
                 )
             
-            # Conservation success message
             if conservation_periods > 0:
                 st.success(f"🛡️ Conservation mode was activated {conservation_periods} times, preserving battery life by using reduced targets")
             else:
-                st.info("🔋 Battery remained above conservation threshold throughout simulation")
+                st.info("� Conservation mode was enabled but never activated (SOC stayed above threshold)")
             
             # Conservation Parameters Section
             st.markdown("#### 🔧 Conservation Parameters") 
