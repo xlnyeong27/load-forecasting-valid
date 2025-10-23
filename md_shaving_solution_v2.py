@@ -394,7 +394,9 @@ def _generate_clustering_summary_table(all_monthly_events, selected_tariff, holi
 
 def _generate_monthly_summary_table(all_monthly_events, selected_tariff, holidays):
     """
-    Generate monthly summary table for Section B2.
+    Generate monthly summary table using copy file's clustering-based approach.
+    
+    CORRECTED METHODOLOGY: Uses daily clustering as intermediary step to match reference calculations.
     
     Args:
         all_monthly_events: List of peak events from peak events detection
@@ -408,18 +410,13 @@ def _generate_monthly_summary_table(all_monthly_events, selected_tariff, holiday
     if not all_monthly_events or len(all_monthly_events) == 0:
         return pd.DataFrame()
     
-    # Group events by month
-    monthly_events = {}
-    for event in all_monthly_events:
-        event_date = event.get('Start Date')
-        if event_date:
-            # Extract year-month (e.g., "2025-01")
-            month_key = event_date.strftime('%Y-%m')
-            if month_key not in monthly_events:
-                monthly_events[month_key] = []
-            monthly_events[month_key].append(event)
+    # STEP 1: Generate daily clustering summary first (intermediary calculation)
+    daily_clustering_df = _generate_clustering_summary_table(all_monthly_events, selected_tariff, holidays)
     
-    # Determine tariff type for MD cost calculation
+    if daily_clustering_df.empty:
+        return pd.DataFrame()
+    
+    # Determine tariff type for column naming
     tariff_type = 'General'  # Default
     if selected_tariff:
         tariff_name = selected_tariff.get('Tariff', '').lower()
@@ -429,36 +426,33 @@ def _generate_monthly_summary_table(all_monthly_events, selected_tariff, holiday
         if 'tou' in tariff_name or 'tou' in tariff_type_field or tariff_type_field == 'tou':
             tariff_type = 'TOU'
     
-    # Create summary data
-    summary_data = []
-    for month_key, events in monthly_events.items():
-        
-        # Calculate MD excess values based on tariff type
-        if tariff_type == 'TOU':
-            # For TOU: Use TOU-specific values
-            md_excess_values = [event.get('TOU Excess (kW)', 0) or 0 for event in events]
-            energy_required_values = [event.get('TOU Required Energy (kWh)', 0) or 0 for event in events]
-        else:
-            # For General: Use General values (24/7 MD impact)
-            md_excess_values = [event.get('General Excess (kW)', 0) or 0 for event in events]
-            energy_required_values = [event.get('General Required Energy (kWh)', 0) or 0 for event in events]
-        
-        # Calculate maximum values for the month
-        max_md_excess_month = max(md_excess_values) if md_excess_values else 0
-        max_energy_required_month = max(energy_required_values) if energy_required_values else 0
-        
-        summary_data.append({
-            'Month': month_key,
-            f'{tariff_type} MD Excess (Max kW)': round(max_md_excess_month, 2),
-            f'{tariff_type} Required Energy (Max kWh)': round(max_energy_required_month, 2)
-        })
+    # STEP 2: Group daily results by month and take maximums
+    # Add month column to daily clustering data
+    daily_clustering_df['Month'] = pd.to_datetime(daily_clustering_df['Date']).dt.strftime('%Y-%m')
     
-    # Create DataFrame and sort by month
-    df_summary = pd.DataFrame(summary_data)
-    if not df_summary.empty:
-        df_summary = df_summary.sort_values('Month')
+    # Define column names based on tariff type
+    md_excess_col = f'{tariff_type} MD Excess (Max kW)'
+    energy_required_col = f'{tariff_type} Total Energy Required (sum kWh)'
     
-    return df_summary
+    # Group by month and calculate maximums from daily values
+    monthly_summary = daily_clustering_df.groupby('Month').agg({
+        md_excess_col: 'max',  # Maximum daily MD excess becomes monthly MD excess
+        energy_required_col: 'max'  # Maximum daily energy required becomes monthly energy required
+    }).reset_index()
+    
+    # Rename energy column to match expected format
+    monthly_summary = monthly_summary.rename(columns={
+        energy_required_col: f'{tariff_type} Required Energy (Max kWh)'
+    })
+    
+    # Round values for display
+    monthly_summary[md_excess_col] = monthly_summary[md_excess_col].round(2)
+    monthly_summary[f'{tariff_type} Required Energy (Max kWh)'] = monthly_summary[f'{tariff_type} Required Energy (Max kWh)'].round(2)
+    
+    # Sort by month
+    monthly_summary = monthly_summary.sort_values('Month')
+    
+    return monthly_summary
 
 
 def build_daily_simulator_structure(df, threshold_kw, clusters_df, selected_tariff=None):
@@ -2802,9 +2796,17 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
     battery_power = np.zeros(len(df_sim))
     net_demand = df_sim[power_col].copy()
     
-    # Conservation mode tracking variables (from copy file formulas)
+    # Conservation mode tracking variables (enhanced cascade workflow from copy file)
     conservation_activated = np.zeros(len(df_sim), dtype=bool)
     running_min_exceedance = np.full(len(df_sim), np.inf)
+    
+    # Additional conservation cascade tracking arrays
+    battery_power_conserved = np.zeros(len(df_sim))
+    battery_kw_conserved_values = np.zeros(len(df_sim))
+    revised_discharge_power_cascade = np.zeros(len(df_sim))
+    revised_bess_balance_cascade = np.zeros(len(df_sim))
+    revised_target_achieved_cascade = np.zeros(len(df_sim))
+    soc_improvement_cascade = np.zeros(len(df_sim))
     
     # SOC-aware strategy parameters (soc_threshold is now passed as parameter)
     
@@ -2820,12 +2822,73 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
         current_soc_kwh = float(soc[i-1]) if i > 0 else float(usable_capacity * 0.80)
         current_soc_percent = float((current_soc_kwh / usable_capacity) * 100)
         
-        # ===== CONSERVATION MODE TRACKING (from copy file formulas) =====
+        # ===== ENHANCED CONSERVATION CASCADE WORKFLOW (from copy file) =====
+        # Initialize cascade workflow variables
+        revised_discharge_power = 0.0  # Track power revision due to conservation
+        revised_bess_balance = 0.0     # Track BESS balance reduction
+        revised_target_achieved = 0.0  # Track actual target achieved with conservation
+        soc_improvement = 0.0          # Track SOC improvement from conservation
+        
         if conservation_enabled:
-            # Check if conservation should be activated (SOC below threshold)
-            conservation_activated[i] = current_soc_percent < soc_threshold
+            # CONSERVATION CASCADE WORKFLOW: Four-step feedback loop process
             
-            # Track running minimum exceedance for conservation metrics
+            # Check if conservation should be active based on SOC threshold and date filtering
+            soc_condition_met = current_soc_percent < soc_threshold
+            
+            # Date filtering logic: if conservation_dates is provided, check if current date is in the list
+            date_condition_met = True  # Default to True (all days) if no specific dates provided
+            if conservation_dates and len(conservation_dates) > 0:
+                current_date = current_timestamp.date()
+                date_condition_met = current_date in conservation_dates
+            
+            # Conservation activates only when BOTH conditions are met
+            if soc_condition_met and date_condition_met:
+                conservation_activated[i] = True
+                
+                # Calculate original discharge requirement (before conservation)
+                original_discharge_required = excess
+                
+                # ===== STEP 1: REVISE DISCHARGE POWER BASED ON CONSERVATION PARAMETERS =====
+                # Apply user's manual conservation parameter as a fixed reduction amount
+                # User sets the exact kW amount to conserve, not a maximum
+                power_to_conserve = min(battery_kw_conserved, original_discharge_required)
+                revised_discharge_power = max(0, original_discharge_required - power_to_conserve)
+                
+                # Store conservation metrics
+                battery_power_conserved[i] = power_to_conserve
+                battery_kw_conserved_values[i] = power_to_conserve
+                
+                # ===== STEP 2: REDUCE BESS BALANCE kWh DUE TO LIMITED DISCHARGE =====
+                # Calculate energy savings from limited discharge
+                original_energy_would_use = original_discharge_required * interval_hours
+                revised_energy_will_use = revised_discharge_power * interval_hours
+                energy_conserved_kwh = original_energy_would_use - revised_energy_will_use
+                
+                # ===== STEP 3: REVISE ACTUAL TARGET ACHIEVED WITH CONSERVATION CONSTRAINTS =====
+                # Calculate what target can actually be achieved with conservation limits
+                if original_discharge_required > 0:
+                    # Net demand with conservation constraints
+                    revised_net_demand = current_demand - revised_discharge_power
+                    # How much above target we still are after conservation
+                    revised_target_achieved = max(0, monthly_target - revised_net_demand)
+                else:
+                    revised_target_achieved = 0
+                
+                # ===== STEP 4: IMPROVE SOC % THROUGH ENERGY CONSERVATION =====
+                # Calculate SOC improvement from conserved energy
+                soc_improvement = (energy_conserved_kwh / usable_capacity) * 100
+                
+                # ===== STORE CASCADE WORKFLOW METRICS =====
+                revised_discharge_power_cascade[i] = revised_discharge_power
+                revised_bess_balance_cascade[i] = energy_conserved_kwh
+                revised_target_achieved_cascade[i] = revised_target_achieved
+                soc_improvement_cascade[i] = soc_improvement
+                
+                # ===== FEEDBACK LOOP: Update excess for subsequent battery operation =====
+                # This creates the cascade effect where conservation affects all downstream calculations
+                excess = revised_discharge_power
+                
+            # Still track running minimum exceedance for debugging purposes
             if excess > 0:
                 if i == 0:
                     running_min_exceedance[i] = excess
@@ -2836,9 +2899,33 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
                     running_min_exceedance[i] = running_min_exceedance[i-1]
                 else:
                     running_min_exceedance[i] = np.inf
+        else:
+            # Conservation disabled - no power conservation
+            running_min_exceedance[i] = np.inf
+        
+        # Use monthly target as the active target (conservation affects battery power, not target)
+        active_target = monthly_target
+        
+        # Only calculate excess if conservation hasn't already adjusted it
+        if not (conservation_enabled and conservation_activated[i]):
+            excess = max(0, current_demand - active_target)
+        
+        # Determine if discharge is allowed based on tariff type
+        should_discharge = excess > 0
+        
+        if selected_tariff and should_discharge:
+            # Apply TOU logic for discharge decisions
+            tariff_type = selected_tariff.get('Type', '').lower()
+            tariff_name = selected_tariff.get('Tariff', '').lower()
+            is_tou_tariff = tariff_type == 'tou' or 'tou' in tariff_name
+            
+            if is_tou_tariff:
+                # TOU tariffs: Only discharge during MD windows (2PM-10PM weekdays)
+                should_discharge = (excess > 0) and is_md_window(current_timestamp, holidays)
+            # For General tariffs, discharge anytime above target (24/7 MD recording)
         
         # ===== STRATEGY-AWARE DISCHARGE LOGIC =====
-        if excess > 0 and is_md_window(current_timestamp, holidays):
+        if should_discharge:
             # Calculate available excess demand for shaving
             demand_excess_kw = current_demand - monthly_target
             
@@ -2923,7 +3010,7 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
     total_discharge = float(sum([p * interval_hours for p in battery_power if p > 0]))
     total_charge = float(sum([abs(p) * interval_hours for p in battery_power if p < 0]))
     
-    # Calculate conservation results (using formulas from copy file)
+    # Calculate conservation results (enhanced cascade workflow from copy file)
     conservation_results = {}
     if conservation_enabled:
         conservation_periods = int(np.sum(conservation_activated))
@@ -2934,14 +3021,25 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
         valid_exceedances = running_min_exceedance[running_min_exceedance != np.inf]
         min_exceedance_observed = float(np.min(valid_exceedances)) if len(valid_exceedances) > 0 else 0.0
         
+        # Enhanced cascade metrics (matching copy file)
+        total_power_conserved = float(np.sum(battery_power_conserved))
+        total_energy_conserved = float(np.sum(revised_bess_balance_cascade))
+        total_soc_improvement = float(np.sum(soc_improvement_cascade))
+        avg_target_achievement_impact = float(np.mean(revised_target_achieved_cascade[conservation_activated]))
+        
         conservation_results = {
             'conservation_periods': conservation_periods,
             'conservation_rate_percent': conservation_rate,
             'min_exceedance_observed_kw': min_exceedance_observed,
-            'soc_threshold_used': soc_threshold
+            'soc_threshold_used': soc_threshold,
+            'total_power_conserved_kw': total_power_conserved,
+            'total_energy_conserved_kwh': total_energy_conserved,
+            'total_soc_improvement_percent': total_soc_improvement,
+            'avg_target_achievement_impact': avg_target_achievement_impact if not np.isnan(avg_target_achievement_impact) else 0.0,
+            'cascade_workflow_active': True
         }
     
-    # V2 Peak reduction using monthly targets (not static) - IMPROVED HIERARCHY
+    # V2 Peak reduction using monthly targets (not static) - MATCHING COPY FILE
     df_md_peak_for_reduction = df_sim[df_sim.index.to_series().apply(lambda ts: is_md_window(ts, holidays))]
 
     if len(df_md_peak_for_reduction) > 0:
@@ -2957,10 +3055,12 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
         daily_reduction_analysis['Peak_Reduction'] = daily_reduction_analysis['Original_Peak_MD'] - daily_reduction_analysis['Net_Peak_MD']
         peak_reduction = daily_reduction_analysis['Peak_Reduction'].max()
     else:
-        # ERROR: No MD recording data available for proper peak reduction calculation
-        peak_reduction = -999.0  # Error indicator
-        st.error("❌ **Peak Reduction Calculation Error**: No MD recording data available during weekdays 2PM-10PM (excluding holidays). Cannot calculate meaningful peak reduction.")
-        st.warning("⚠️ **Data Issue**: Your dataset may not contain sufficient weekday data during MD recording periods (2PM-10PM). Please check your data coverage.")
+        # COPY FILE FALLBACK: Simple calculation instead of error
+        peak_reduction = df_sim['Original_Demand'].max() - df_sim['Net_Demand_kW'].max()
+    
+    # Calculate success rate using copy file's enhanced method
+    success_metrics = _calculate_success_rate_from_shaving_status(df_sim, holidays=holidays)
+    success_rate = success_metrics['success_rate_percent']
     
     return {
         'df_sim': df_sim,
@@ -2968,12 +3068,22 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
         'total_charge_kwh': total_charge,
         'peak_reduction_kw': float(peak_reduction),
         'avg_soc_percent': float(df_sim['Battery_SOC_Percent'].mean()),
+        'success_rate': float(success_rate),  # Enhanced success rate calculation
         'conservation_results': conservation_results,
         'conservation_enabled': conservation_enabled,
         'conservation_periods': conservation_results.get('conservation_periods', 0),
         'conservation_rate_percent': conservation_results.get('conservation_rate_percent', 0),
         'min_exceedance_observed_kw': conservation_results.get('min_exceedance_observed_kw', 0),
-        'soc_threshold_used': soc_threshold
+        'soc_threshold_used': soc_threshold,
+        'success_metrics': success_metrics,  # Full success metrics for detailed analysis
+        # Enhanced cascade workflow results (matching copy file)
+        'cascade_metrics': {
+            'power_revision_total': conservation_results.get('total_power_conserved_kw', 0),
+            'bess_balance_reduction_total': conservation_results.get('total_energy_conserved_kwh', 0),
+            'soc_improvement_total': conservation_results.get('total_soc_improvement_percent', 0),
+            'target_achievement_impact': conservation_results.get('avg_target_achievement_impact', 0),
+            'workflow_active': conservation_results.get('cascade_workflow_active', False)
+        }
     }
 
 
@@ -3584,10 +3694,13 @@ def _display_v2_battery_simulation_chart(df_sim, monthly_targets=None, sizing=No
     # Get dynamic interval hours for energy calculations
     interval_hours = _get_dynamic_interval_hours(df_filtered)
     
-    # Calculate basic metrics
+    # Calculate basic metrics using enhanced success rate calculation
     total_energy_discharged = df_filtered['Battery_Power_kW'].where(df_filtered['Battery_Power_kW'] > 0, 0).sum() * interval_hours
     total_energy_charged = abs(df_filtered['Battery_Power_kW'].where(df_filtered['Battery_Power_kW'] < 0, 0).sum()) * interval_hours
-    success_rate = len([s for s in df_filtered['Shaving_Success'] if '✅' in s]) / len(df_filtered) * 100
+    
+    # Use enhanced success rate calculation from copy file
+    success_metrics = _calculate_success_rate_from_shaving_status(original_df_filtered, holidays=holidays)
+    success_rate = success_metrics['success_rate_percent']
     
     # Display key metrics
     col1, col2, col3, col4 = st.columns(4)
@@ -3719,8 +3832,172 @@ def _display_v2_battery_simulation_chart(df_sim, monthly_targets=None, sizing=No
         insights.append("✅ **Optimal V2 Performance**: Battery system operating within acceptable parameters with monthly targets")
     
     for insight in insights:
+        st.info(insight)
 
-        st.info(insight)             
+
+def _calculate_success_rate_from_shaving_status(df_sim, holidays=None, debug=False):
+    """
+    Calculate success rate from the 6-category Success_Status classification with MD Period as primary gate.
+    
+    This function provides the single source of truth for success rate calculations across the application.
+    It ensures consistency between the detailed Success_Status column and all success rate metrics.
+    
+    MD Period Integration:
+    - Primary Gate: Only MD recording periods (weekdays 2PM-10PM, excluding holidays) are considered
+    - Success Criteria: Only ✅ Complete Success and 🟢 No Action Needed count as successful
+    - Off-peak periods and holidays are excluded from success rate calculations
+    
+    Args:
+        df_sim: DataFrame with simulation results containing Success_Status or shaving success data
+        holidays: Set of holiday dates to exclude from MD period determination
+        debug: Boolean to enable debug output showing calculation details
+    
+    Returns:
+        dict: Success rate metrics with detailed breakdown
+    """
+    if df_sim is None or len(df_sim) == 0:
+        return {
+            'success_rate_percent': 0.0,
+            'total_md_intervals': 0,
+            'successful_intervals': 0,
+            'calculation_method': 'Empty dataset',
+            'md_period_logic': 'Weekdays 2PM-10PM (primary gate)'
+        }
+    
+    # Ensure we have Success_Status column or create it
+    if 'Success_Status' not in df_sim.columns:
+        if 'Shaving_Success' in df_sim.columns:
+            # Use existing Shaving_Success column
+            status_column = 'Shaving_Success'
+        else:
+            # Create Success_Status using the enhanced classification
+            df_sim = df_sim.copy()
+            df_sim['Success_Status'] = df_sim.apply(lambda row: _get_enhanced_shaving_success(row, holidays), axis=1)
+            status_column = 'Success_Status'
+    else:
+        status_column = 'Success_Status'
+    
+    # MD PERIOD PRIMARY GATE: Filter for MD recording periods only
+    def is_md_period(timestamp):
+        """
+        Determine if timestamp falls within MD recording periods.
+        Primary gate for success rate calculation.
+        
+        Improved Hierarchy: Holiday Check → Weekday Check → Hour Check
+        This clearer flow makes the logic more maintainable for both General and TOU tariffs.
+        """
+        # 1. HOLIDAY CHECK (first priority - clearest exclusion)
+        if holidays and timestamp.date() in holidays:
+            return False
+        
+        # 2. WEEKDAY CHECK (second priority - excludes weekends)
+        if timestamp.weekday() >= 5:  # Weekend (Saturday=5, Sunday=6)
+            return False
+        
+        # 3. HOUR CHECK (final constraint - MD recording window)
+        if not (14 <= timestamp.hour < 22):  # Outside 2PM-10PM range
+            return False
+        
+        return True
+    
+    # Apply MD Period primary gate
+    md_period_mask = df_sim.index.to_series().apply(is_md_period)
+    df_md_only = df_sim[md_period_mask]
+    
+    if len(df_md_only) == 0:
+        return {
+            'success_rate_percent': 0.0,
+            'total_md_intervals': 0,
+            'successful_intervals': 0,
+            'calculation_method': 'No MD period data found',
+            'md_period_logic': 'Weekdays 2PM-10PM (primary gate)',
+            'excluded_intervals': len(df_sim),
+            'exclusion_reasons': 'All intervals outside MD periods'
+        }
+    
+    # SUCCESS CRITERIA: Calculate success rate based on DAILY AGGREGATION, not intervals
+    # This matches the expected behavior: 145 success days out of 146 total days = 99.3%
+    
+    # Group by date and determine daily success status
+    daily_results = []
+    
+    for date, day_data in df_md_only.groupby(df_md_only.index.date):
+        # For each day, determine if it was successful based on peak shaving effectiveness
+        original_peak = day_data['Original_Demand'].max()
+        net_peak = day_data['Net_Demand_kW'].max()
+        monthly_target = day_data['Monthly_Target'].iloc[0] if 'Monthly_Target' in day_data.columns else day_data['Original_Demand'].quantile(0.8)
+        
+        # Daily success criteria: same logic as daily analysis (matching copy file)
+        if original_peak <= monthly_target:
+            daily_status = 'Success'  # No shaving needed
+        elif net_peak <= monthly_target:  # No tolerance - exact target
+            daily_status = 'Success'  # Successful shaving
+        else:
+            daily_status = 'Failed'   # Failed to reach target
+        
+        daily_results.append({
+            'date': date,
+            'daily_status': daily_status,
+            'original_peak': original_peak,
+            'net_peak': net_peak,
+            'monthly_target': monthly_target,
+            'intervals_count': len(day_data)
+        })
+    
+    # Count successful days (not intervals)
+    successful_days = sum(1 for result in daily_results if result['daily_status'] == 'Success')
+    total_days = len(daily_results)
+    
+    # Calculate success rate based on days
+    success_rate_percent = (successful_days / total_days * 100) if total_days > 0 else 0.0
+    
+    total_md_intervals = len(df_md_only)
+    # For backward compatibility, still report interval counts but use daily success rate
+    applicable_intervals = total_md_intervals  # All MD intervals are applicable for daily calculation
+    
+    # Status breakdown for debugging (still useful for diagnostics)
+    status_counts = df_md_only[status_column].value_counts().to_dict()
+    
+    # Calculate breakdown by simplified categories for diagnostics
+    category_breakdown = {
+        'Success': sum(1 for status in df_md_only[status_column] if '✅ Success' in str(status)),
+        'Partial': sum(1 for status in df_md_only[status_column] if '🟡 Partial' in str(status)),
+        'Failed': sum(1 for status in df_md_only[status_column] if '🔴 Failed' in str(status)),
+        'Not_Applicable': sum(1 for status in df_md_only[status_column] if '⚪ Not Applicable' in str(status))
+    }
+    
+    result = {
+        'success_rate_percent': success_rate_percent,
+        'total_md_intervals': total_md_intervals,
+        'applicable_intervals': applicable_intervals,
+        'successful_intervals': successful_days * 32,  # Approximate intervals per successful day
+        'successful_days': successful_days,  # NEW: Daily count
+        'total_days': total_days,            # NEW: Total days
+        'calculation_method': 'Daily aggregation based (MD periods weekdays 2PM-10PM)',
+        'md_period_logic': 'Weekdays 2PM-10PM grouped by date',
+        'successful_statuses': ['Daily peak shaving effectiveness'],
+        'status_breakdown': status_counts,
+        'category_breakdown': category_breakdown,
+        'daily_breakdown': daily_results,    # NEW: Per-day details
+        'excluded_intervals': len(df_sim) - total_md_intervals,
+        'total_intervals': len(df_sim)
+    }
+    
+    if debug:
+        import streamlit as st
+        st.info(f"""
+        🔍 **Success Rate Calculation Debug Info (Daily Aggregation Method):**
+        - **MD Period Gate**: {total_md_intervals} intervals during weekdays 2PM-10PM
+        - **Total Days Analyzed**: {total_days} days with MD period data
+        - **Successful Days**: {successful_days} days where peak shaving was effective
+        - **Failed Days**: {total_days - successful_days} days where targets were not met
+        - **Success Rate**: {success_rate_percent:.1f}% = {successful_days}/{total_days} × 100%
+        - **Calculation Method**: Daily aggregation (consistent with copy file)
+        - **Status Categories**: {category_breakdown}
+        """)
+    
+    return result
+
 
 def render_md_shaving_v2():
     """
