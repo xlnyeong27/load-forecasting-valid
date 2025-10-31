@@ -3920,19 +3920,65 @@ def _display_v2_battery_simulation_chart(df_sim, monthly_targets=None, sizing=No
                 📊 **Level 1 Filter Results**: Showing {len(df_sim_filtered):,} records from {filtered_days} days of {len(df_sim):,} total records ({filtered_days}/{total_days} days, {len(df_sim_filtered)/len(df_sim)*100:.1f}%)
                 
                 **Day Breakdown:**
-                - ✅ **Success Days**: {success_days} days
-                - 🟡 **Partial Days**: {partial_days} days
-                - 🔴 **Failed Days**: {failed_days} days
+                - ✅ **Success Days**: {success_days} days (Net Demand ≤ Monthly Target)
+                - 🟡 **Partial Days**: {partial_days} days (≥20% excess reduction but target not met)
+                - 🔴 **Failed Days**: {failed_days} days (<20% reduction, low SOC <25%, or critical SOC <5%)
                 """)
+                
+                # Add expandable section with detailed threshold explanations for filtered view
+                with st.expander("ℹ️ Day Classification Threshold Details"):
+                    st.markdown("""
+                    **🎯 Success Classification (✅ Green):**
+                    - Net Demand ≤ Monthly Target
+                    - Complete target achievement during MD recording hours
+                    
+                    **🟡 Partial Success Threshold:**
+                    - Reduction percentage ≥ **20%** of excess demand
+                    - At least 20% of the excess above target was successfully reduced
+                    - Formula: `(Original - Net) / (Original - Target) ≥ 0.20`
+                    
+                    **🔴 Failed Day Thresholds:**
+                    - **Insufficient Reduction**: <20% of excess demand reduced
+                    - **Low SOC Prevention**: Battery SOC <25% prevented discharge
+                    - **No Discharge**: Battery failed to discharge when needed (SOC ≥25%)
+                    - **Critical SOC**: Battery SOC dropped below 5% (safety limit)
+                    
+                    **Battery State of Charge (SOC) Limits:**
+                    - **25% SOC**: Minimum threshold for allowing discharge
+                    - **5% SOC**: Critical safety limit (system protection)
+                    """)
         else:
             # Always show day breakdown even when no filters are applied
             st.info(f"""
             📊 **All Days**: Showing {len(df_sim_filtered):,} records from {total_days} days
             
             **Day Breakdown:**
-            - ✅ **Success Days**: {success_days} days
-            - 🟡 **Partial Days**: {partial_days} days
-            - 🔴 **Failed Days**: {failed_days} days
+            - ✅ **Success Days**: {success_days} days (Net Demand ≤ Monthly Target)
+            - 🟡 **Partial Days**: {partial_days} days (≥20% excess reduction but target not met)
+            - 🔴 **Failed Days**: {failed_days} days (<20% reduction, low SOC <25%, or critical SOC <5%)
+            """)
+        
+        # Add expandable section with detailed threshold explanations
+        with st.expander("ℹ️ Day Classification Threshold Details"):
+            st.markdown("""
+            **🎯 Success Classification (✅ Green):**
+            - Net Demand ≤ Monthly Target
+            - Complete target achievement during MD recording hours
+            
+            **🟡 Partial Success Threshold:**
+            - Reduction percentage ≥ **20%** of excess demand
+            - At least 20% of the excess above target was successfully reduced
+            - Formula: `(Original - Net) / (Original - Target) ≥ 0.20`
+            
+            **🔴 Failed Day Thresholds:**
+            - **Insufficient Reduction**: <20% of excess demand reduced
+            - **Low SOC Prevention**: Battery SOC <25% prevented discharge
+            - **No Discharge**: Battery failed to discharge when needed (SOC ≥25%)
+            - **Critical SOC**: Battery SOC dropped below 5% (safety limit)
+            
+            **Battery State of Charge (SOC) Limits:**
+            - **25% SOC**: Minimum threshold for allowing discharge
+            - **5% SOC**: Critical safety limit (system protection)
             """)
         
         # Use filtered data for the rest of the chart function
@@ -5143,7 +5189,7 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
         
         # 🔋 CONSERVATION CASCADE WORKFLOW - Comprehensive Conservation Logic
         # STEP 1: Initialize conservation parameters for this interval
-        current_soc_percent = (soc[i-1] / usable_capacity * 100) if i > 0 else 80
+        current_soc_percent = (soc[i-1] / battery_capacity * 100) if i > 0 else 95
         conservation_activated[i] = False
         battery_power_conserved[i] = 0.0
         battery_kw_conserved_values[i] = 0.0
@@ -5199,7 +5245,7 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
                 
                 # ===== STEP 4: IMPROVE SOC % THROUGH ENERGY CONSERVATION =====
                 # Calculate SOC improvement from conserved energy
-                soc_improvement = (energy_conserved_kwh / usable_capacity) * 100
+                soc_improvement = (energy_conserved_kwh / battery_capacity) * 100
                 
                 # ===== STORE CASCADE WORKFLOW METRICS =====
                 revised_discharge_power_cascade[i] = revised_discharge_power
@@ -5252,8 +5298,8 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
             max_allowable_discharge = excess  # This already accounts for conservation adjustments
             
             # Get current SOC for C-rate calculations
-            current_soc_kwh = soc[i-1] if i > 0 else usable_capacity * 0.80  # Start at 80% SOC (within 5%-95% range)
-            current_soc_percent = (current_soc_kwh / usable_capacity) * 100
+            current_soc_kwh = soc[i-1] if i > 0 else battery_capacity * 0.95  # Start at 95% of total capacity
+            current_soc_percent = (current_soc_kwh / battery_capacity) * 100  # Use total capacity for percentage
             
             # Get battery specifications with C-rate constraints
             if hasattr(st.session_state, 'tabled_analysis_selected_battery'):
@@ -5297,12 +5343,12 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
             if i > 0:
                 soc[i] = soc[i-1]
             else:
-                soc[i] = usable_capacity * 0.8
+                soc[i] = battery_capacity * 0.95  # Start at 95% of total capacity
             
             # Enhanced charging logic with TOU precondition support
             current_time = df_sim.index[i]
             hour = current_time.hour
-            soc_percentage = (soc[i] / usable_capacity) * 100
+            soc_percentage = (soc[i] / battery_capacity) * 100  # Use total capacity for percentage
             
             # Calculate dynamic demand thresholds based on recent patterns
             # Dynamic lookback: 24 hours based on actual data interval
@@ -5327,40 +5373,55 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
                 # Get TOU charging urgency
                 tou_info = _get_tou_charging_urgency(current_time, soc_percentage, holidays)
                 
-                # TOU SPECIAL CHARGING LOGIC
+                # TOU ENHANCED CHARGING LOGIC with strict time window enforcement
                 if tou_info['is_charging_window'] and tou_info['is_weekday']:
                     tou_charging_active = True
                     
-                    # TOU charging conditions based on urgency (standardized to 95% max SOC)
-                    if tou_info['urgency_level'] == 'critical':
-                        # CRITICAL: Must charge aggressively - less than 4 hours to MD window
-                        should_charge = (soc_percentage < 95) and (current_demand < avg_demand * 1.2)
-                        charge_rate_factor = min(1.0, 0.8 * tou_info['charge_rate_multiplier'])  # Up to 1.0x (max power)
-                        
-                        # Dynamic logging: every hour based on actual data interval
-                        intervals_per_hour = int(1 / interval_hours) if interval_hours > 0 else 4  # Fallback to 4 for 15-min
-                        if i % intervals_per_hour == 0:  # Log every hour
-                            tou_feedback_messages.append(f"🚨 CRITICAL TOU Charging: {tou_info['hours_until_md']:.1f}h until MD window, SOC: {soc_percentage:.1f}%")
+                    # Enhanced TOU charging with strict time windows (10PM-2PM only)
+                    hour = current_time.hour
+                    is_strict_charging_window = (hour >= 22 or hour < 14)  # 10PM-2PM window
+                    
+                    if is_strict_charging_window:
+                        # TOU charging conditions based on urgency (standardized to 95% max SOC)
+                        if tou_info['urgency_level'] == 'critical':
+                            # CRITICAL: <4 hours to MD window, aggressive overnight charging only
+                            should_charge = (soc_percentage < 95) and (current_demand < avg_demand * 1.2)
+                            charge_rate_factor = 1.0  # Maximum power during critical overnight hours
                             
-                    elif tou_info['urgency_level'] == 'high':
-                        # HIGH: Enhanced charging - 4-8 hours to MD window (standardized to 95% max SOC)
-                        should_charge = (soc_percentage < 95) and (current_demand < avg_demand * 1.0)
-                        charge_rate_factor = 0.6 * tou_info['charge_rate_multiplier']
-                        
-                        # Dynamic logging: every 2 hours based on actual data interval
-                        intervals_per_2_hours = int(2 / interval_hours) if interval_hours > 0 else 8  # Fallback to 8 for 15-min
-                        if i % intervals_per_2_hours == 0:  # Log every 2 hours
-                            tou_feedback_messages.append(f"⚡ HIGH TOU Charging: {tou_info['hours_until_md']:.1f}h until MD window, SOC: {soc_percentage:.1f}%")
+                            # Dynamic logging: every hour based on actual data interval
+                            intervals_per_hour = int(1 / interval_hours) if interval_hours > 0 else 4  # Fallback to 4 for 15-min
+                            if i % intervals_per_hour == 0:  # Log every hour
+                                tou_feedback_messages.append(f"🚨 CRITICAL TOU Overnight Charging: {tou_info['hours_until_md']:.1f}h until MD window, SOC: {soc_percentage:.1f}%")
+                                
+                        elif tou_info['urgency_level'] == 'high':
+                            # HIGH: 4-8 hours to MD window, enhanced overnight charging
+                            should_charge = (soc_percentage < 95) and (current_demand < avg_demand * 1.0)
+                            charge_rate_factor = 0.8 * tou_info['charge_rate_multiplier']
                             
+                            # Dynamic logging: every 2 hours based on actual data interval
+                            intervals_per_2_hours = int(2 / interval_hours) if interval_hours > 0 else 8  # Fallback to 8 for 15-min
+                            if i % intervals_per_2_hours == 0:  # Log every 2 hours
+                                tou_feedback_messages.append(f"⚡ HIGH TOU Overnight Charging: {tou_info['hours_until_md']:.1f}h until MD window, SOC: {soc_percentage:.1f}%")
+                                
+                        else:
+                            # NORMAL: Standard overnight charging window
+                            should_charge = (soc_percentage < 95) and (current_demand < avg_demand * 0.8)
+                            charge_rate_factor = 0.6
+                            
+                            # Dynamic logging: every 4 hours based on actual data interval
+                            intervals_per_4_hours = int(4 / interval_hours) if interval_hours > 0 else 16  # Fallback to 16 for 15-min
+                            if i % intervals_per_4_hours == 0:  # Log every 4 hours
+                                tou_feedback_messages.append(f"🔋 Standard TOU Overnight Charging: {tou_info['hours_until_md']:.1f}h until MD window, SOC: {soc_percentage:.1f}%")
+                    
                     else:
-                        # NORMAL: Standard overnight charging (standardized to 95% max SOC)
-                        should_charge = (soc_percentage < 95) and (current_demand < avg_demand * 0.8)
-                        charge_rate_factor = 0.5
-                        
-                        # Dynamic logging: every 4 hours based on actual data interval
-                        intervals_per_4_hours = int(4 / interval_hours) if interval_hours > 0 else 16  # Fallback to 16 for 15-min
-                        if i % intervals_per_4_hours == 0:  # Log every 4 hours
-                            tou_feedback_messages.append(f"🔋 Standard TOU Charging: {tou_info['hours_until_md']:.1f}h until MD window, SOC: {soc_percentage:.1f}%")
+                        # Outside strict charging window (2PM-10PM): Very restricted TOU charging
+                        if soc_percentage < 10:  # Emergency only
+                            should_charge = current_demand < monthly_target * 0.9  # Well below target
+                            charge_rate_factor = 0.2  # Minimal charging
+                            tou_feedback_messages.append(f"🆘 EMERGENCY TOU Charging: SOC critically low ({soc_percentage:.1f}%) during peak hours")
+                        else:
+                            should_charge = False  # No charging during peak hours
+                            tou_feedback_messages.append(f"🚫 TOU Peak Hours: No charging allowed ({hour}:00, SOC: {soc_percentage:.1f}%)")
                 
                 # Outside TOU charging window - use standard tariff-aware logic
                 if not tou_charging_active:
@@ -5415,15 +5476,27 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
             # Execute charging if conditions are met
             max_soc_target = 0.95 if is_tou_tariff else 0.95  # Both use 95% now, but TOU is more aggressive
             
-            if should_charge and soc[i] < usable_capacity * max_soc_target:
-                # V2 SMART MD CONSTRAINT: Only apply MD target constraint during MD recording periods
+            if should_charge and soc[i] < battery_capacity * max_soc_target:  # FIX: Use battery_capacity instead of usable_capacity
+                # V2 SMART MD CONSTRAINT: Enhanced logic for TOU and MD period awareness
                 is_md_recording_period = is_md_window(current_time, holidays)
                 
-                if is_md_recording_period:
-                    # During MD periods: Limit charging to keep Net Demand <= Active Target (with conservation)
-                    max_allowable_charging_for_md = max(0, active_target_for_charging - current_demand)
+                if is_tou_tariff and is_md_recording_period:
+                    # TOU STRICT RULE: Very limited charging during MD window (2PM-10PM)
+                    if soc_percentage < 20:  # Emergency charging only
+                        max_allowable_charging_for_md = min(max_power * 0.2, active_target_for_charging - current_demand)
+                    else:
+                        max_allowable_charging_for_md = 0  # NO charging during MD window for normal SOC
+                        
+                elif not is_tou_tariff and is_md_recording_period:
+                    # General tariff: Allow charging when demand is BELOW target (reserve for MD spikes)
+                    if current_demand <= active_target_for_charging:
+                        # Below target: Allow charging to reserve energy for potential MD spikes
+                        max_allowable_charging_for_md = max_power  # Full charging capability
+                    else:
+                        # Above target: Limit charging to prevent increasing MD further
+                        max_allowable_charging_for_md = max(0, active_target_for_charging - current_demand)
                 else:
-                    # During OFF-PEAK periods: Allow unrestricted charging (essential for nighttime charging)
+                    # OFF-PEAK periods: Allow unrestricted charging for both tariff types
                     max_allowable_charging_for_md = max_power  # No MD constraint during off-peak
                 
                 # Get battery specifications with C-rate constraints
@@ -5440,7 +5513,7 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
                 max_charge_power_c_rate = power_limits['max_charge_power_kw']
                 
                 # Calculate charge power with ALL constraints
-                remaining_capacity = usable_capacity * 0.95 - soc[i]
+                remaining_capacity = battery_capacity * 0.95 - soc[i]  # FIX: Use battery_capacity instead of usable_capacity
                 max_charge_energy = remaining_capacity / efficiency
                 
                 # V2 ENHANCED CHARGING POWER CALCULATION with all constraints
@@ -5478,7 +5551,7 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
                     intervals_per_2_hours = int(2 / interval_hours) if interval_hours > 0 else 8  # Fallback to 8 for 15-min
                     if final_charge_power > 50 and i % intervals_per_2_hours == 0:  # Log every 2 hours for large charging
                         period_type = "MD" if is_md_recording_period else "Off-Peak"
-                        tou_feedback_messages.append(f"🔋 Charging {final_charge_power:.1f}kW during {period_type} period, SOC: {soc_percentage:.1f}% → {(soc[i]/usable_capacity)*100:.1f}%")
+                        tou_feedback_messages.append(f"🔋 Charging {final_charge_power:.1f}kW during {period_type} period, SOC: {soc_percentage:.1f}% → {(soc[i]/battery_capacity)*100:.1f}%")
                         
                 else:
                     # No charging possible
@@ -5498,8 +5571,9 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
                 net_demand.iloc[i] = current_demand
         
         # Ensure SOC stays within 5%-95% limits for standardized battery protection
-        soc[i] = max(usable_capacity * 0.05, min(soc[i], usable_capacity * 0.95))
-        soc_percent[i] = (soc[i] / usable_capacity) * 100
+        # FIXED: Use battery_capacity for upper limit to eliminate double limitation
+        soc[i] = max(usable_capacity * 0.05, min(soc[i], battery_capacity * 0.95))
+        soc_percent[i] = (soc[i] / battery_capacity) * 100  # Use total capacity for percentage calculation
     
     # Add V2 simulation results to dataframe
     df_sim['Battery_Power_kW'] = battery_power
@@ -6473,56 +6547,112 @@ def _create_enhanced_battery_table(df_sim, selected_tariff=None, holidays=None):
         lambda x: f"+{abs(x):.1f}" if x < 0 else f"-{x:.1f}" if x > 0 else "0.0"
     )
     
-    # 7. C Rate (new column)
+    # 7. Charge (+ve)/Discharge (-ve) kWh (Energy equivalent with round-trip efficiency)
+    def calculate_energy_with_efficiency(power_kw):
+        """Calculate energy with round-trip efficiency from battery specifications"""
+        if power_kw < 0:  # Charging (negative power)
+            # During charging: More energy from grid needed due to efficiency losses
+            # Get efficiency from selected battery specifications
+            efficiency_percent = 95.0  # Default efficiency
+            if hasattr(st.session_state, 'tabled_analysis_selected_battery'):
+                battery_spec = st.session_state.tabled_analysis_selected_battery['spec']
+                efficiency_percent = battery_spec.get('round_trip_efficiency', 95.0)
+            
+            # Grid energy required = Power × Time ÷ Efficiency
+            grid_energy = abs(power_kw) * interval_hours / (efficiency_percent / 100)
+            return f"+{grid_energy:.2f}"
+            
+        elif power_kw > 0:  # Discharging (positive power)
+            # During discharging: Battery must provide more energy internally to deliver requested power to grid
+            # Get efficiency from selected battery specifications
+            efficiency_percent = 95.0  # Default efficiency
+            if hasattr(st.session_state, 'tabled_analysis_selected_battery'):
+                battery_spec = st.session_state.tabled_analysis_selected_battery['spec']
+                efficiency_percent = battery_spec.get('round_trip_efficiency', 95.0)
+            
+            # Battery energy consumed = Grid Power Required ÷ Efficiency
+            # (Battery must discharge more internally to deliver the required grid power)
+            battery_energy_consumed = power_kw * interval_hours / (efficiency_percent / 100)
+            return f"-{battery_energy_consumed:.2f}"
+        else:
+            return "0.00"
+    
+    enhanced_columns['Charge (+ve)/Discharge (-ve) kWh'] = df_with_rate_change['Battery_Power_kW'].apply(
+        calculate_energy_with_efficiency
+    )
+    
+    # 8. Energy Loss (kWh) - Shows efficiency losses during charging/discharging
+    def calculate_energy_loss(power_kw):
+        """Calculate energy loss due to round-trip efficiency"""
+        if power_kw == 0:
+            return "0.00"
+        
+        # Get efficiency from selected battery specifications
+        efficiency_percent = 95.0  # Default efficiency
+        if hasattr(st.session_state, 'tabled_analysis_selected_battery'):
+            battery_spec = st.session_state.tabled_analysis_selected_battery['spec']
+            efficiency_percent = battery_spec.get('round_trip_efficiency', 95.0)
+        
+        # Calculate base energy without efficiency losses
+        base_energy = abs(power_kw) * interval_hours
+        
+        if power_kw < 0:  # Charging
+            # Energy loss = Grid energy required - Battery energy stored
+            grid_energy = base_energy / (efficiency_percent / 100)
+            energy_loss = grid_energy - base_energy
+        else:  # Discharging  
+            # Energy loss = Battery energy consumed - Grid energy delivered
+            battery_energy = base_energy / (efficiency_percent / 100)
+            energy_loss = battery_energy - base_energy
+        
+        return f"{energy_loss:.3f}"
+    
+    enhanced_columns['Energy Loss (kWh)'] = df_with_rate_change['Battery_Power_kW'].apply(
+        calculate_energy_loss
+    )
+    
+    # 9. C Rate (new column)
     enhanced_columns['C Rate'] = df_with_rate_change['Battery_Power_kW'].apply(
         lambda x: f"{abs(x) / max(battery_capacity_kwh, 1):.2f}C" if x != 0 else "0.00C"
     )
     
-    # 8. Orignal_Shave_kW (new column - original shave before any adjustments)
+    # 10. Orignal_Shave_kW (new column - original shave before any adjustments)
     enhanced_columns['Orignal_Shave_kW'] = df_with_rate_change.apply(
         lambda row: max(0, row['Original_Demand'] - row['Monthly_Target']), axis=1
     ).round(1)
     
-    # 9. Net_Demand_kW
+    # 11. Net_Demand_kW
     enhanced_columns['Net_Demand_kW'] = df_with_rate_change['Net_Demand_kW'].round(1)
     
-    # 10. Charge (+ve)/Discharge (-ve) kW
-    enhanced_columns['Charge (+ve)/Discharge (-ve) kW'] = df_with_rate_change['Battery_Power_kW'].apply(
-        lambda x: f"+{abs(x):.1f}" if x < 0 else f"-{x:.1f}" if x > 0 else "0.0"
-    )
+    # 12. Battery_SOC_kWh (renamed from BESS_Balance_kWh for consistency)
+    enhanced_columns['Battery_SOC_kWh'] = df_with_rate_change['Battery_SOC_kWh'].round(1)
     
-    # 11. BESS_Balance_kWh
-    enhanced_columns['BESS_Balance_kWh'] = df_with_rate_change['Battery_SOC_kWh'].round(1)
-    
-    # 12. Daily Performance Type (NEW - Level 1 Filter by Day Type)
+    # 13. Daily Performance Type (NEW - Level 1 Filter by Day Type)
     enhanced_columns['Daily Performance Type'] = df_with_rate_change.apply(
         lambda row: _classify_daily_performance_type(row, holidays), axis=1
     )
     
-    # 13. SOC_%
+    # 14. SOC_%
     enhanced_columns['SOC_%'] = df_with_rate_change['Battery_SOC_Percent'].round(1)
     
-    # 13. SOC_%
-    enhanced_columns['SOC_%'] = df_with_rate_change['Battery_SOC_Percent'].round(1)
-    
-    # 14. SOC_Status
+    # 15. SOC_Status
     enhanced_columns['SOC_Status'] = df_with_rate_change['Battery_SOC_Percent'].apply(
         lambda x: '🔴 Critical' if x < 25 else '🟡 Low' if x < 40 else '🟢 Normal' if x < 80 else '🔵 High'
     )
     
-    # 15. MD_Period
+    # 16. MD_Period
     enhanced_columns['MD_Period'] = df_with_rate_change.index.map(lambda x: '🔴 Peak' if is_md_window(x, holidays) else '🟢 Off-Peak')
     
-    # 16. REPLACED: Rate_of_Change instead of Target_Violation
+    # 17. REPLACED: Rate_of_Change instead of Target_Violation
     enhanced_columns['Rate_of_Change'] = df_with_rate_change['Rate_of_Change'].round(3)
     
-    # 17. NEW: Change_Direction (replaces Target_Violation functionality)
+    # 18. NEW: Change_Direction (replaces Target_Violation functionality)
     enhanced_columns['Change_Direction'] = df_with_rate_change['Change_Direction']
     
-    # 18. NEW: Change_Magnitude (provides actionable insight)
+    # 19. NEW: Change_Magnitude (provides actionable insight)
     enhanced_columns['Change_Magnitude'] = df_with_rate_change['Change_Magnitude'].astype(str)
     
-    # 19. Conserve_Activated
+    # 20. Conserve_Activated
     if 'Conserve_Activated' in df_with_rate_change.columns:
         enhanced_columns['Conserve_Activated'] = df_with_rate_change['Conserve_Activated'].apply(
             lambda x: '🔋 ACTIVE' if x else '⚪ Normal'
@@ -6530,44 +6660,44 @@ def _create_enhanced_battery_table(df_sim, selected_tariff=None, holidays=None):
     else:
         enhanced_columns['Conserve_Activated'] = '⚪ Normal'
     
-    # 20. Battery Conserved kW
+    # 19. Battery Conserved kW
     if 'Battery Conserved kW' in df_with_rate_change.columns:
         enhanced_columns['Battery Conserved kW'] = df_with_rate_change['Battery Conserved kW'].round(1)
     else:
         enhanced_columns['Battery Conserved kW'] = 0.0
     
-    # 21. Revised_Target_kW
+    # 22. Revised_Target_kW
     enhanced_columns['Revised_Target_kW'] = df_with_rate_change.apply(
         lambda row: _calculate_revised_target_kw(row, holidays), axis=1
     ).round(1)
     
-    # 22. SOC for Conservation (new column)
+    # 23. SOC for Conservation (new column)
     enhanced_columns['SOC for Conservation'] = df_with_rate_change['Battery_SOC_Percent'].apply(
         lambda x: f"{x:.1f}% {'🔋 LOW' if x < 50 else '✅ OK'}"
     )
     
-    # 23. Revised Shave kW (new column)
+    # 24. Revised Shave kW (new column)
     enhanced_columns['Revised Shave kW'] = df_with_rate_change.apply(
         lambda row: max(0, row['Original_Demand'] - _calculate_revised_target_kw(row, holidays)), axis=1
     ).round(1)
     
-    # 24. Revised Energy Required (kWh) (new column)
+    # 25. Revised Energy Required (kWh) (new column)
     enhanced_columns['Revised Energy Required (kWh)'] = df_with_rate_change.apply(
         lambda row: max(0, row['Original_Demand'] - _calculate_revised_target_kw(row, holidays)) * interval_hours, axis=1
     ).round(2)
     
-    # 🔋 CONSERVATION CASCADE WORKFLOW COLUMNS (new columns 25-28)
+    # 🔋 CONSERVATION CASCADE WORKFLOW COLUMNS (new columns 26-29)
     if 'Revised_Discharge_Power_kW' in df_with_rate_change.columns:
-        # 25. Revised Discharge Power (kW) - Step 1 of cascade
+        # 26. Revised Discharge Power (kW) - Step 1 of cascade
         enhanced_columns['Revised Discharge Power (kW)'] = df_with_rate_change['Revised_Discharge_Power_kW'].round(1)
         
-        # 26. BESS Balance Preserved (kWh) - Step 2 of cascade  
+        # 27. BESS Balance Preserved (kWh) - Step 2 of cascade  
         enhanced_columns['BESS Balance Preserved (kWh)'] = df_with_rate_change['Revised_BESS_Balance_kWh'].round(2)
         
-        # 27. Target Achieved w/ Conservation (kW) - Step 3 of cascade
+        # 28. Target Achieved w/ Conservation (kW) - Step 3 of cascade
         enhanced_columns['Target Achieved w/ Conservation (kW)'] = df_with_rate_change['Revised_Target_Achieved_kW'].round(1)
         
-        # 28. SOC Improvement (%) - Step 4 of cascade
+        # 29. SOC Improvement (%) - Step 4 of cascade
         enhanced_columns['SOC Improvement (%)'] = df_with_rate_change['SOC_Improvement_Percent'].apply(
             lambda x: f"+{x:.2f}%" if x > 0 else "0.00%"
         )
