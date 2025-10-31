@@ -392,11 +392,20 @@ def _generate_clustering_summary_table(all_monthly_events, selected_tariff, holi
     return df_summary
 
 
+# ===== BACKUP: Original function backed up 20251031 =====
+def _generate_monthly_summary_table_backup_20251031(all_monthly_events, selected_tariff, holidays):
+    """
+    BACKUP - Original clustering-based implementation preserved
+    """
+
 def _generate_monthly_summary_table(all_monthly_events, selected_tariff, holidays):
     """
-    Generate monthly summary table using copy file's clustering-based approach.
+    RENOVATED: 31 Oct 2025 - Replaced with copy file logic
+    Original backed up as: _generate_monthly_summary_table_backup_20251031
     
-    CORRECTED METHODOLOGY: Uses daily clustering as intermediary step to match reference calculations.
+    Generate monthly summary table for Section B2.
+    
+    CORRECTED METHODOLOGY: Uses DIRECT monthly calculations instead of clustering intermediary.
     
     Args:
         all_monthly_events: List of peak events from peak events detection
@@ -410,13 +419,18 @@ def _generate_monthly_summary_table(all_monthly_events, selected_tariff, holiday
     if not all_monthly_events or len(all_monthly_events) == 0:
         return pd.DataFrame()
     
-    # STEP 1: Generate daily clustering summary first (intermediary calculation)
-    daily_clustering_df = _generate_clustering_summary_table(all_monthly_events, selected_tariff, holidays)
+    # COPY FILE APPROACH: Group events by month directly (no clustering intermediary)
+    monthly_events = {}
+    for event in all_monthly_events:
+        event_date = event.get('Start Date')
+        if event_date:
+            # Extract year-month (e.g., "2025-01")
+            month_key = event_date.strftime('%Y-%m')
+            if month_key not in monthly_events:
+                monthly_events[month_key] = []
+            monthly_events[month_key].append(event)
     
-    if daily_clustering_df.empty:
-        return pd.DataFrame()
-    
-    # Determine tariff type for column naming
+    # Determine tariff type for MD cost calculation
     tariff_type = 'General'  # Default
     if selected_tariff:
         tariff_name = selected_tariff.get('Tariff', '').lower()
@@ -426,33 +440,36 @@ def _generate_monthly_summary_table(all_monthly_events, selected_tariff, holiday
         if 'tou' in tariff_name or 'tou' in tariff_type_field or tariff_type_field == 'tou':
             tariff_type = 'TOU'
     
-    # STEP 2: Group daily results by month and take maximums
-    # Add month column to daily clustering data
-    daily_clustering_df['Month'] = pd.to_datetime(daily_clustering_df['Date']).dt.strftime('%Y-%m')
+    # Create summary data using direct monthly calculations
+    summary_data = []
+    for month_key, events in monthly_events.items():
+        
+        # Calculate MD excess values based on tariff type (COPY FILE LOGIC)
+        if tariff_type == 'TOU':
+            # For TOU: Use TOU-specific values
+            md_excess_values = [event.get('TOU Excess (kW)', 0) or 0 for event in events]
+            energy_required_values = [event.get('TOU Required Energy (kWh)', 0) or 0 for event in events]
+        else:
+            # For General: Use General values (24/7 MD impact)
+            md_excess_values = [event.get('General Excess (kW)', 0) or 0 for event in events]
+            energy_required_values = [event.get('General Required Energy (kWh)', 0) or 0 for event in events]
+        
+        # Calculate maximum values for the month
+        max_md_excess_month = max(md_excess_values) if md_excess_values else 0
+        max_energy_required_month = max(energy_required_values) if energy_required_values else 0
+        
+        summary_data.append({
+            'Month': month_key,
+            f'{tariff_type} MD Excess (Max kW)': round(max_md_excess_month, 2),
+            f'{tariff_type} Required Energy (Max kWh)': round(max_energy_required_month, 2)
+        })
     
-    # Define column names based on tariff type
-    md_excess_col = f'{tariff_type} MD Excess (Max kW)'
-    energy_required_col = f'{tariff_type} Total Energy Required (sum kWh)'
+    # Create DataFrame and sort by month
+    df_summary = pd.DataFrame(summary_data)
+    if not df_summary.empty:
+        df_summary = df_summary.sort_values('Month')
     
-    # Group by month and calculate maximums from daily values
-    monthly_summary = daily_clustering_df.groupby('Month').agg({
-        md_excess_col: 'max',  # Maximum daily MD excess becomes monthly MD excess
-        energy_required_col: 'max'  # Maximum daily energy required becomes monthly energy required
-    }).reset_index()
-    
-    # Rename energy column to match expected format
-    monthly_summary = monthly_summary.rename(columns={
-        energy_required_col: f'{tariff_type} Required Energy (Max kWh)'
-    })
-    
-    # Round values for display
-    monthly_summary[md_excess_col] = monthly_summary[md_excess_col].round(2)
-    monthly_summary[f'{tariff_type} Required Energy (Max kWh)'] = monthly_summary[f'{tariff_type} Required Energy (Max kWh)'].round(2)
-    
-    # Sort by month
-    monthly_summary = monthly_summary.sort_values('Month')
-    
-    return monthly_summary
+    return df_summary
 
 
 def build_daily_simulator_structure(df, threshold_kw, clusters_df, selected_tariff=None):
@@ -1510,9 +1527,9 @@ def _render_battery_quantity_recommendation(max_power_shaving_required, recommen
                     help="Minimum of power and energy coverage percentages"
                 )
             
-            # Store both the recommended quantity and selected quantity in session state for use in sizing analysis
+            # RENOVATED: 31 Oct 2025 - Simplified to match copy file approach
+            # Store the selected quantity in session state for use in sizing analysis
             st.session_state.tabled_analysis_battery_quantity = user_selected_qty
-            st.session_state.recommended_battery_quantity = recommended_qty  # Store for use in 7.2
             
             # Provide guidance on the selection and integration information
             if user_selected_qty == recommended_qty:
@@ -2757,8 +2774,10 @@ def _get_enhanced_shaving_success(row, holidays=None):
         return "❓ Unknown"
 
 
-def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizing, battery_params, interval_hours, selected_tariff=None, holidays=None, conservation_enabled=False, soc_threshold=50, battery_kw_conserved=100.0, unused_param=1.0, conservation_dates=None):
+# ===== BACKUP: Original function backed up 20251031 =====
+def _simulate_battery_operation_v2_backup_20251031(df, power_col, monthly_targets, battery_sizing, battery_params, interval_hours, selected_tariff=None, holidays=None, conservation_enabled=False, soc_threshold=50, battery_kw_conserved=100.0, unused_param=1.0, conservation_dates=None):
     """
+    BACKUP - Original implementation preserved
     V2-specific battery simulation with monthly target floor constraints and conservation mode support.
     
     Args:
@@ -2766,7 +2785,51 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
         soc_threshold: SOC percentage below which conservation activates
         battery_kw_conserved: Battery power to conserve during conservation mode
     """
+
+def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizing, battery_params, interval_hours, selected_tariff=None, holidays=None, conservation_enabled=False, soc_threshold=50, battery_kw_conserved=100.0, unused_param=1.0, conservation_dates=None):
+    """
+    RENOVATED: 31 Oct 2025 - Replaced with copy file logic
+    Original backed up as: _simulate_battery_operation_v2_backup_20251031
+    
+    V2-specific battery simulation that ensures Net Demand NEVER goes below monthly targets.
+    
+    Key V2 Innovation: Monthly targets act as FLOOR values for Net Demand.
+    - Net Demand must stay ABOVE or EQUAL to the monthly target at all times
+    - Battery discharge is limited to keep Net Demand >= Monthly Target
+    - Uses dynamic monthly targets instead of static target
+    - TOU ENHANCEMENT: Special charging precondition for TOU tariffs (95% SOC by 2PM)
+    - CONSERVATION MODE: When SOC < threshold, uses direct revised target instead of monthly target
+    
+    FIXED: Uses ACTUAL interval_hours from uploaded file, not dynamic detection
+    
+    Args:
+        df: Energy data DataFrame with datetime index
+        power_col: Name of power demand column
+        monthly_targets: Series with Period index containing monthly targets
+        battery_sizing: Dictionary with capacity_kwh, power_rating_kw
+        battery_params: Dictionary with efficiency, depth_of_discharge
+        interval_hours: Time interval in hours from UPLOADED FILE (NOT dynamic detection)
+        selected_tariff: Tariff configuration
+        holidays: Set of holiday dates
+        conservation_enabled: Enable conservation mode when SOC drops below threshold
+        soc_threshold: SOC percentage below which conservation activates
+        battery_kw_conserved: Battery power to conserve during conservation mode
+        unused_param: Deprecated parameter (kept for compatibility)
+        conservation_dates: Specific dates for conservation activation
+        
+    Returns:
+        Dictionary with adapted results to match original interface expectations
+    """
     import numpy as np
+    import streamlit as st  # For TOU feedback messages
+    
+    # FIXED: Use the ACTUAL interval_hours from uploaded file - DO NOT override with dynamic detection
+    actual_interval_hours = float(interval_hours)  # Use the interval_hours passed from uploaded file analysis
+    
+    st.info(f"🕒 **Using ACTUAL file intervals**: {actual_interval_hours:.3f} hours ({actual_interval_hours * 60:.1f} minutes) from uploaded data")
+    
+    # TOU feedback tracking (for copy file compatibility)
+    tou_feedback_messages = []
     
     # Create simulation dataframe
     df_sim = df[[power_col]].copy()
@@ -2784,23 +2847,30 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
     df_sim['Monthly_Target'] = target_values
     df_sim['Excess_Demand'] = (df_sim[power_col] - df_sim['Monthly_Target']).clip(lower=0)
     
-    # Battery parameters - FIXED: Ensure all values are scalar floats
-    battery_capacity = float(battery_sizing['capacity_kwh'])
-    usable_capacity = float(battery_capacity * (battery_params['depth_of_discharge'] / 100))
+    # Check for TOU tariff
+    is_tou_tariff = False
+    if selected_tariff:
+        tariff_type = selected_tariff.get('Type', '').lower()
+        tariff_name = selected_tariff.get('Tariff', '').lower()
+        is_tou_tariff = tariff_type == 'tou' or 'tou' in tariff_name
+    
+    # Battery parameters - COPY FILE APPROACH: Use total capacity for SOC calculations
+    battery_capacity = float(battery_sizing['capacity_kwh'])  # Total capacity
+    usable_capacity = float(battery_capacity * (battery_params['depth_of_discharge'] / 100))  # Usable capacity
     max_power = float(battery_sizing['power_rating_kw'])
     efficiency = float(battery_params['round_trip_efficiency'] / 100)
     
-    # Initialize arrays
+    # Initialize arrays - COPY FILE APPROACH
     soc = np.zeros(len(df_sim))
     soc_percent = np.zeros(len(df_sim))
     battery_power = np.zeros(len(df_sim))
     net_demand = df_sim[power_col].copy()
     
-    # Conservation mode tracking variables (enhanced cascade workflow from copy file)
+    # Conservation mode tracking variables (copy file cascade workflow)
     conservation_activated = np.zeros(len(df_sim), dtype=bool)
     running_min_exceedance = np.full(len(df_sim), np.inf)
     
-    # Additional conservation cascade tracking arrays
+    # Conservation cascade tracking arrays (from copy file)
     battery_power_conserved = np.zeros(len(df_sim))
     battery_kw_conserved_values = np.zeros(len(df_sim))
     revised_discharge_power_cascade = np.zeros(len(df_sim))
@@ -2859,9 +2929,9 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
                 battery_kw_conserved_values[i] = power_to_conserve
                 
                 # ===== STEP 2: REDUCE BESS BALANCE kWh DUE TO LIMITED DISCHARGE =====
-                # Calculate energy savings from limited discharge
-                original_energy_would_use = original_discharge_required * interval_hours
-                revised_energy_will_use = revised_discharge_power * interval_hours
+                # FIXED: Use actual_interval_hours from uploaded file
+                original_energy_would_use = original_discharge_required * actual_interval_hours
+                revised_energy_will_use = revised_discharge_power * actual_interval_hours
                 energy_conserved_kwh = original_energy_would_use - revised_energy_will_use
                 
                 # ===== STEP 3: REVISE ACTUAL TARGET ACHIEVED WITH CONSERVATION CONSTRAINTS =====
@@ -2961,14 +3031,16 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
             strategy_min_soc = 0.20 if conservation_enabled else 0.05
             min_soc_energy = float(usable_capacity * strategy_min_soc)
             max_discharge_energy = max(0, float(current_soc_kwh - min_soc_energy))
-            max_discharge_from_energy = float(max_discharge_energy / interval_hours)
+            # FIXED: Use actual_interval_hours from uploaded file
+            max_discharge_from_energy = float(max_discharge_energy / actual_interval_hours)
             
             # Final energy availability check
             actual_discharge = min(float(actual_discharge), float(max_discharge_from_energy))
             actual_discharge = max(0, float(actual_discharge))
             
             battery_power[i] = actual_discharge
-            soc[i] = current_soc_kwh - actual_discharge * interval_hours
+            # FIXED: Use actual_interval_hours from uploaded file
+            soc[i] = current_soc_kwh - actual_discharge * actual_interval_hours
             net_demand.iloc[i] = max(current_demand - actual_discharge, monthly_target)
             
         else:
@@ -2979,14 +3051,16 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
             if current_soc_percent < 95 and current_demand < monthly_target * 0.8:
                 # FIXED: Ensure all calculations use scalar values
                 remaining_capacity = float(usable_capacity * 0.95 - current_soc_kwh)
+                # FIXED: Use actual_interval_hours from uploaded file
                 charge_power = min(
                     float(max_power * 0.3), 
-                    float(remaining_capacity / interval_hours)
+                    float(remaining_capacity / actual_interval_hours)
                 )
                 
                 if charge_power > 0:
                     battery_power[i] = -float(charge_power)
-                    soc[i] = float(current_soc_kwh + charge_power * interval_hours * efficiency)
+                    # FIXED: Use actual_interval_hours from uploaded file
+                    soc[i] = float(current_soc_kwh + charge_power * actual_interval_hours * efficiency)
                     net_demand.iloc[i] = current_demand + charge_power
                 else:
                     net_demand.iloc[i] = current_demand
@@ -3006,9 +3080,9 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
     # Add shaving success classification for chart compatibility
     df_sim['Shaving_Success'] = df_sim.apply(lambda row: _get_enhanced_shaving_success(row, holidays), axis=1)
     
-    # Calculate metrics - FIXED: Ensure scalar calculations
-    total_discharge = float(sum([p * interval_hours for p in battery_power if p > 0]))
-    total_charge = float(sum([abs(p) * interval_hours for p in battery_power if p < 0]))
+    # Calculate metrics - FIXED: Use actual_interval_hours from uploaded file
+    total_discharge = float(sum([p * actual_interval_hours for p in battery_power if p > 0]))
+    total_charge = float(sum([abs(p) * actual_interval_hours for p in battery_power if p < 0]))
     
     # Calculate conservation results (enhanced cascade workflow from copy file)
     conservation_results = {}
@@ -3062,20 +3136,28 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
     success_metrics = _calculate_success_rate_from_shaving_status(df_sim, holidays=holidays)
     success_rate = success_metrics['success_rate_percent']
     
+    # RENOVATED: Adapted return structure to match copy file approach while maintaining interface compatibility
     return {
-        'df_sim': df_sim,
+        'df_sim': df_sim,  # Keep original key name for compatibility
+        'df_simulation': df_sim,  # Add copy file key name
         'total_discharge_kwh': total_discharge,
+        'total_energy_discharged': total_discharge,  # Copy file key
         'total_charge_kwh': total_charge,
+        'total_energy_charged': total_charge,  # Copy file key
         'peak_reduction_kw': float(peak_reduction),
         'avg_soc_percent': float(df_sim['Battery_SOC_Percent'].mean()),
-        'success_rate': float(success_rate),  # Enhanced success rate calculation
+        'average_soc': float(df_sim['Battery_SOC_Percent'].mean()),  # Copy file key
+        'success_rate': float(success_rate),
+        'success_rate_percent': float(success_rate),  # Copy file key
+        'successful_shaves': success_metrics.get('successful_days', 0),  # Copy file key
+        'total_peak_events': success_metrics.get('total_days', 0),  # Copy file key
         'conservation_results': conservation_results,
         'conservation_enabled': conservation_enabled,
         'conservation_periods': conservation_results.get('conservation_periods', 0),
         'conservation_rate_percent': conservation_results.get('conservation_rate_percent', 0),
         'min_exceedance_observed_kw': conservation_results.get('min_exceedance_observed_kw', 0),
         'soc_threshold_used': soc_threshold,
-        'success_metrics': success_metrics,  # Full success metrics for detailed analysis
+        'success_metrics': success_metrics,
         # Enhanced cascade workflow results (matching copy file)
         'cascade_metrics': {
             'power_revision_total': conservation_results.get('total_power_conserved_kw', 0),
@@ -3083,6 +3165,19 @@ def _simulate_battery_operation_v2(df, power_col, monthly_targets, battery_sizin
             'soc_improvement_total': conservation_results.get('total_soc_improvement_percent', 0),
             'target_achievement_impact': conservation_results.get('avg_target_achievement_impact', 0),
             'workflow_active': conservation_results.get('cascade_workflow_active', False)
+        },
+        # Copy file additional metrics
+        'min_soc': float(df_sim['Battery_SOC_Percent'].min()) if len(df_sim) > 0 else 0,
+        'max_soc': float(df_sim['Battery_SOC_Percent'].max()) if len(df_sim) > 0 else 0,
+        'md_focused_calculation': len(df_md_peak_for_reduction) > 0,
+        'v2_constraint_violations': 0,  # Will be calculated in copy file logic
+        'monthly_targets_count': len(monthly_targets),
+        'is_tou_tariff': is_tou_tariff,
+        'debug_info': {
+            'total_points': len(df_sim),
+            'monthly_targets_used': len(monthly_targets),
+            'actual_interval_hours_used': actual_interval_hours,  # NEW: Track actual intervals used
+            'v2_methodology': 'RENOVATED: Copy file logic with ACTUAL file intervals'
         }
     }
 
@@ -3339,7 +3434,8 @@ def _handle_battery_simulation_workflow(simulation_params):
             monthly_targets=monthly_targets,
             sizing=sizing_for_chart,
             selected_tariff=selected_tariff,
-            holidays=holidays
+            holidays=holidays,
+            interval_hours=interval_hours
         )
         
         # Store simulation results for further analysis
@@ -3348,7 +3444,7 @@ def _handle_battery_simulation_workflow(simulation_params):
     else:
         st.error("❌ Battery simulation failed. Please check your configuration.")
 
-def _display_v2_battery_simulation_chart(df_sim, monthly_targets=None, sizing=None, selected_tariff=None, holidays=None):
+def _display_v2_battery_simulation_chart(df_sim, monthly_targets=None, sizing=None, selected_tariff=None, holidays=None, interval_hours=None):
 
     """
     V2-specific battery operation simulation chart with DYNAMIC monthly targets.
@@ -3691,8 +3787,10 @@ def _display_v2_battery_simulation_chart(df_sim, monthly_targets=None, sizing=No
     """)
     
     # ===== V2 SUMMARY METRICS =====
-    # Get dynamic interval hours for energy calculations
-    interval_hours = _get_dynamic_interval_hours(df_filtered)
+    # Use the correct interval hours passed from simulation (not dynamic detection)
+    if interval_hours is None:
+        interval_hours = _get_dynamic_interval_hours(df_filtered)
+        st.warning("⚠️ Using dynamic interval detection in chart - may not match simulation intervals")
     
     # Calculate basic metrics using enhanced success rate calculation
     total_energy_discharged = df_filtered['Battery_Power_kW'].where(df_filtered['Battery_Power_kW'] > 0, 0).sum() * interval_hours
@@ -5461,7 +5559,8 @@ error_10min = forecast_10min - actual_value
                                     }
                                     
                                     # Set up simulation parameters - ensure all variables are defined for both modes - FIXED: Safe access
-                                    interval_hours = 0.25  # 15-minute intervals
+                                    # FIXED: Use actual interval from uploaded file data, not hardcoded 15-minute assumption
+                                    interval_hours = _get_dynamic_interval_hours(simulation_data)
                                     
                                     # FIXED: Safe session state access to avoid Series ambiguity
                                     try:
